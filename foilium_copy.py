@@ -113,6 +113,28 @@ HeatMap(
     max_zoom=10
 ).add_to(m)
 
+# 3) Теперь создадим MarkerCluster для населённых пунктов
+with open("hotosm_kaz_populated_places_points_geojson.geojson", encoding="utf-8") as f:
+    points = json.load(f)
+
+marker_cluster = MarkerCluster(name="Населённые пункты (кластер)", show=False).add_to(m)
+
+# Добавляем каждую точку в кластер
+for feature in points["features"]:
+    geom = feature["geometry"]
+    props = feature["properties"]
+    
+    if geom["type"] == "Point":
+        lon, lat = geom["coordinates"]
+        name = props.get("name", "Без названия")
+        folium.Marker(
+            location=[lat, lon],
+            popup=name,
+            tooltip=name
+        ).add_to(marker_cluster)
+
+# Добавляем LayerControl
+folium.LayerControl().add_to(m)
 
 # --- 7) Отображаем карту в Streamlit ---
 with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:

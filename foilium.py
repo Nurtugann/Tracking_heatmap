@@ -117,7 +117,7 @@ HeatMap(
 with open("hotosm_kaz_populated_places_points_geojson.geojson", encoding="utf-8") as f:
     points = json.load(f)
 
-marker_cluster = MarkerCluster(name="Населённые пункты (кластер)").add_to(m)
+marker_cluster = MarkerCluster(name="Населённые пункты (кластер)", show=False).add_to(m)
 
 # Добавляем каждую точку в кластер
 for feature in points["features"]:
