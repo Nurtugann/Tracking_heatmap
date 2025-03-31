@@ -103,13 +103,18 @@ df_time_sum = df_time.groupby(
 # ----------------------------------------------------------------------------
 m = folium.Map(location=[48.0, 68.0], zoom_start=5)
 
-# 1) Слой с границами регионов
 with open("geoBoundaries-KAZ-ADM2.geojson", encoding="utf-8") as f:
     polygons = json.load(f)
 folium.GeoJson(
     polygons,
-    name="Границы регионов"
+    name="Границы регионов",
+    style_function=lambda feature: {
+        'color': 'black',       # цвет линий
+        'weight': 1,            # толщина линий (можно уменьшить, например, до 0.5)
+        'fillOpacity': 0        # отсутствие заливки
+    }
 ).add_to(m)
+
 
 # 2) Слой с HeatMap (по времени пребывания)
 heat_data = []
@@ -117,8 +122,9 @@ for _, row in df_time_sum.iterrows():
     lat = row["latitude_конеч"]
     lon = row["longitude_конеч"]
     weight = row["dwelling_time"]
-    if pd.notnull(lat) and pd.notnull(lon):
+    if pd.notnull(lat) and pd.notnull(lon) and weight > 0:
         heat_data.append([lat, lon, weight])
+
 HeatMap(
     heat_data,
     name="Время пребывания (HeatMap)",
@@ -145,7 +151,7 @@ for feature in points["features"]:
 
 # 4) Дополнительный слой для детальной информации о времени пребывания в точках
 # При клике на точку будут показаны времена отъезда и прибытия, а также имя агента.
-dwell_group = folium.FeatureGroup(name="Детальное время остановок", show=False)
+dwell_group = folium.FeatureGroup(name="Детальное время остановок", show=True)
 # Создаем DataFrame только с событиями, где dwelling_time > 0
 df_dwell_events = df_time[df_time["dwelling_time"] > 0].copy()
 df_dwell_events["Прибытие"] = df_dwell_events["Конец"] + pd.to_timedelta(df_dwell_events["dwelling_time"], unit="s")
@@ -170,7 +176,8 @@ for (lat, lon), group in grouped_events:
 for (lat, lon), popup_text in popup_texts.items():
     folium.CircleMarker(
         location=[lat, lon],
-        radius=3,
+        radius=3,          # уменьшенный радиус
+        weight=1,          # уменьшенная толщина обводки
         color="blue",
         fill=True,
         fill_color="blue",
@@ -178,6 +185,7 @@ for (lat, lon), popup_text in popup_texts.items():
         popup=folium.Popup(popup_text, max_width=300),
         tooltip=agent_tooltips.get((lat, lon), "")
     ).add_to(dwell_group)
+
 dwell_group.add_to(m)
 
 # Добавляем переключатель слоёв
@@ -189,5 +197,6 @@ with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:
     m.save(map_path)
 with open(map_path, 'r', encoding='utf-8') as f:
     html = f.read()
-st.components.v1.html(html, height=600, width=1000)
+st.components.v1.html(html, height=800, width=1400)
+
 os.remove(map_path)
