@@ -15,7 +15,7 @@ st.title("Теплокарта времени пребывания")
 def load_data():
     df = pd.read_csv("data.csv")
     df["Начало"] = pd.to_datetime(df["Начало"], errors='coerce')
-    df["Конец"]  = pd.to_datetime(df["Конец"],  errors='coerce')
+    df["Конец"]  = pd.to_datetime(df["Конец"], errors='coerce')
     return df
 
 df = load_data()
@@ -28,15 +28,15 @@ min_time_py = min_time.to_pydatetime()
 max_time_py = max_time.to_pydatetime()
 
 if "time_range" not in st.session_state:
-    st.session_state.time_range = (min_time_py, max_time_py)
+    st.session_state["time_range"] = (min_time_py, max_time_py)
 time_range = st.slider(
     "Выберите период (по дате)",
     min_value=min_time_py,
     max_value=max_time_py,
-    value=st.session_state.time_range,
+    value=st.session_state["time_range"],
     key="time_slider"
 )
-st.session_state.time_range = time_range
+st.session_state["time_range"] = time_range
 
 filtered_df = df[
     (df["Начало"] >= time_range[0]) &
@@ -46,47 +46,49 @@ filtered_df = df[
 # --- 3) Выбор агента ---
 all_agents = ["Все"] + sorted(filtered_df["Группировка"].dropna().unique())
 if "selected_agent" not in st.session_state:
-    st.session_state.selected_agent = "Все"
+    st.session_state["selected_agent"] = "Все"
 selected_agent = st.selectbox(
     "Выберите агента (Группировка)", 
     all_agents, 
-    index=all_agents.index(st.session_state.selected_agent),
+    index=all_agents.index(st.session_state["selected_agent"]),
     key="agent_select"
 )
-st.session_state.selected_agent = selected_agent
+st.session_state["selected_agent"] = selected_agent
 
 if selected_agent != "Все":
     filtered_df = filtered_df[filtered_df["Группировка"] == selected_agent]
 
 # ----------------------------------------------------------------------------
-# ------------------ Расчёт времени пребывания "на точке" ---------------------
+# ------------------ Оптимизированный расчёт времени пребывания ---------------------
 # ----------------------------------------------------------------------------
-def calculate_time_spent(df_local, threshold=1e-4):
+def calculate_time_spent_vectorized(df_local, threshold=1e-4):
     df_copy = df_local.copy()
     df_copy.sort_values(by=["Группировка", "Начало"], inplace=True)
-    df_copy["dwelling_time"] = 0.0
-
-    for group_name, group_data in df_copy.groupby("Группировка", group_keys=False):
-        idx_list = group_data.index.to_list()
-        for i in range(len(idx_list) - 1):
-            idx_i  = idx_list[i]
-            idx_i1 = idx_list[i + 1]
-            
-            lat_end_i    = group_data.loc[idx_i, "latitude_конеч"]
-            lon_end_i    = group_data.loc[idx_i, "longitude_конеч"]
-            lat_start_i1 = group_data.loc[idx_i1, "latitude_нач"]
-            lon_start_i1 = group_data.loc[idx_i1, "longitude_нач"]
-            
-            dist = np.sqrt((lat_end_i - lat_start_i1)**2 + (lon_end_i - lon_start_i1)**2)
-            t_end   = group_data.loc[idx_i, "Конец"]
-            t_start = group_data.loc[idx_i1, "Начало"]
-            if pd.notnull(t_end) and pd.notnull(t_start):
-                delta_sec = (t_start - t_end).total_seconds()
-                if delta_sec > 0:
-                    df_copy.at[idx_i, "dwelling_time"] = delta_sec
+    
+    # Сдвиг значений в пределах группы
+    df_copy['next_lat'] = df_copy.groupby("Группировка")["latitude_нач"].shift(-1)
+    df_copy['next_lon'] = df_copy.groupby("Группировка")["longitude_нач"].shift(-1)
+    df_copy['next_start'] = df_copy.groupby("Группировка")["Начало"].shift(-1)
+    
+    # Вычисляем расстояние
+    df_copy['dist'] = np.sqrt(
+        (df_copy["latitude_конеч"] - df_copy['next_lat'])**2 +
+        (df_copy["longitude_конеч"] - df_copy['next_lon'])**2
+    )
+    
+    # Вычисляем разницу во времени (секунды)
+    df_copy['delta_sec'] = (df_copy['next_start'] - df_copy["Конец"]).dt.total_seconds()
+    
+    # Присваиваем dwelling_time, если условие выполняется
+    df_copy["dwelling_time"] = np.where(
+        (df_copy['dist'] < threshold) & (df_copy['delta_sec'] > 0),
+        df_copy['delta_sec'],
+        0.0
+    )
+    
     return df_copy
 
-df_time = calculate_time_spent(filtered_df, threshold=1e-4)
+df_time = calculate_time_spent_vectorized(filtered_df, threshold=1e-4)
 
 # Для HeatMap агрегируем по координатам конечных точек
 df_time_sum = df_time.groupby(
@@ -94,27 +96,22 @@ df_time_sum = df_time.groupby(
 )["dwelling_time"].sum().reset_index()
 
 # ----------------------------------------------------------------------------
-# --------- Вывод агрегированных данных (при необходимости) -----------------
-# Здесь можно убрать вывод общей таблицы, если не требуется
-# ----------------------------------------------------------------------------
-
-# ----------------------------------------------------------------------------
 # --------- Создаём карту: HeatMap + границы регионов + MarkerCluster --------
 # ----------------------------------------------------------------------------
 m = folium.Map(location=[48.0, 68.0], zoom_start=5)
 
+# 1) Слой с границами регионов
 with open("geoBoundaries-KAZ-ADM2.geojson", encoding="utf-8") as f:
     polygons = json.load(f)
 folium.GeoJson(
     polygons,
     name="Границы регионов",
     style_function=lambda feature: {
-        'color': 'black',       # цвет линий
-        'weight': 1,            # толщина линий (можно уменьшить, например, до 0.5)
-        'fillOpacity': 0        # отсутствие заливки
+        'color': 'black',
+        'weight': 1,
+        'fillOpacity': 0
     }
 ).add_to(m)
-
 
 # 2) Слой с HeatMap (по времени пребывания)
 heat_data = []
@@ -124,7 +121,6 @@ for _, row in df_time_sum.iterrows():
     weight = row["dwelling_time"]
     if pd.notnull(lat) and pd.notnull(lon) and weight > 0:
         heat_data.append([lat, lon, weight])
-
 HeatMap(
     heat_data,
     name="Время пребывания (HeatMap)",
@@ -149,21 +145,17 @@ for feature in points["features"]:
             tooltip=name
         ).add_to(marker_cluster)
 
-# 4) Дополнительный слой для детальной информации о времени пребывания в точках
-# При клике на точку будут показаны времена отъезда и прибытия, а также имя агента.
-dwell_group = folium.FeatureGroup(name="Детальное время остановок", show=True)
-# Создаем DataFrame только с событиями, где dwelling_time > 0
+# 4) Дополнительный слой для детальной информации о времени остановок
+dwell_group = folium.FeatureGroup(name="Детальное время остановок", show=False)
 df_dwell_events = df_time[df_time["dwelling_time"] > 0].copy()
 df_dwell_events["Прибытие"] = df_dwell_events["Конец"] + pd.to_timedelta(df_dwell_events["dwelling_time"], unit="s")
 df_dwell_events["Конец_str"] = df_dwell_events["Конец"].dt.strftime("%Y-%m-%d %H:%M:%S")
 df_dwell_events["Прибытие_str"] = df_dwell_events["Прибытие"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-# Группируем события по конечным координатам
 grouped_events = df_dwell_events.groupby(["latitude_конеч", "longitude_конеч"])
 popup_texts = {}
 agent_tooltips = {}
 for (lat, lon), group in grouped_events:
-    # Собираем уникальные имена агентов в этой точке
     agents = group["Группировка"].unique()
     agent_names = ", ".join(agents)
     lines = [f"Агент: {agent_names}"]
@@ -176,8 +168,8 @@ for (lat, lon), group in grouped_events:
 for (lat, lon), popup_text in popup_texts.items():
     folium.CircleMarker(
         location=[lat, lon],
-        radius=3,          # уменьшенный радиус
-        weight=1,          # уменьшенная толщина обводки
+        radius=3,
+        weight=1,
         color="blue",
         fill=True,
         fill_color="blue",
@@ -185,7 +177,6 @@ for (lat, lon), popup_text in popup_texts.items():
         popup=folium.Popup(popup_text, max_width=300),
         tooltip=agent_tooltips.get((lat, lon), "")
     ).add_to(dwell_group)
-
 dwell_group.add_to(m)
 
 # Добавляем переключатель слоёв
@@ -198,5 +189,4 @@ with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:
 with open(map_path, 'r', encoding='utf-8') as f:
     html = f.read()
 st.components.v1.html(html, height=800, width=1400)
-
 os.remove(map_path)
