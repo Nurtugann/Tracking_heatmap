@@ -4,7 +4,7 @@ import numpy as np
 import json
 
 st.set_page_config(layout="wide")
-st.title("🔥 Теплокарта с переключаемыми слоями (JS + Leaflet)")
+st.title("🔥 Теплокарта с переключаемыми слоями (JS + Leaflet) - Нормализация")
 
 # --------------------------------------------------------------------------------
 # 1. Загрузка данных
@@ -43,7 +43,7 @@ if selected_agent != "Все":
 
 
 # --------------------------------------------------------------------------------
-# 3. Расчёт времени пребывания (наивный подход, как во втором коде)
+# 3. Расчёт времени пребывания (наивный подход)
 # --------------------------------------------------------------------------------
 def calculate_time_spent(df_local, threshold=1e-4):
     """
@@ -74,27 +74,27 @@ def calculate_time_spent(df_local, threshold=1e-4):
 df_time = calculate_time_spent(filtered_df)
 df_time_sum = df_time.groupby(["latitude_конеч", "longitude_конеч"], dropna=False)["dwelling_time"].sum().reset_index()
 
-# --------------------------------------------------------------------------------
-# 4. Формирование данных для HeatMap
-# --------------------------------------------------------------------------------
-# Массив вида [[lat, lon, weight], ...]
+
 heat_points = []
 for _, row in df_time_sum.iterrows():
     lat = row["latitude_конеч"]
     lon = row["longitude_конеч"]
-    weight = row["dwelling_time"]
-    if pd.notnull(lat) and pd.notnull(lon) and weight > 0:
-        heat_points.append([lat, lon, weight])
+    val = row["dwelling_time"]
+    if pd.notnull(lat) and pd.notnull(lon) and val > 0:
+        # Обрезаем снизу и сверху
+        # Нормируем в [0..1]:
+        heat_points.append([lat, lon, 1])
+
 
 # --------------------------------------------------------------------------------
-# 5. Формирование слоя "Остановки" (детальные точки с popup)
+# 5. Слой "Остановки" (детальные точки с popup)
 # --------------------------------------------------------------------------------
 detailed_events = df_time[df_time["dwelling_time"] > 0].copy()
 detailed_events["Прибытие"] = detailed_events["Конец"] + pd.to_timedelta(detailed_events["dwelling_time"], unit="s")
 detailed_events["Конец_str"] = detailed_events["Конец"].dt.strftime("%Y-%m-%d %H:%M:%S")
 detailed_events["Прибытие_str"] = detailed_events["Прибытие"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-markers_js = ""  # Здесь аккумулируем JS-код для добавления маркеров
+markers_js = ""
 for _, row in detailed_events.iterrows():
     lat = row["latitude_конеч"]
     lon = row["longitude_конеч"]
@@ -105,7 +105,6 @@ for _, row in detailed_events.iterrows():
         f"Отъезд: {row['Прибытие_str']}"
     )
     if pd.notnull(lat) and pd.notnull(lon):
-        # Экранируем одинарные кавычки в тексте
         popup_text_escaped = popup_text.replace("'", "\\'")
         markers_js += (
             f"L.circleMarker([{lat}, {lon}], "
@@ -126,30 +125,21 @@ with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="u
 
 city_markers_js = ""
 for feature in city_geojson.get("features", []):
-    # Избавляемся от возможных None
     geom = feature.get("geometry", {})
     props = feature.get("properties", {})
-
-    # Если geometry или properties пустые, пропускаем
     if not geom or not props:
         continue
-
-    # Проверяем тип и координаты
     if geom.get("type") == "Point" and "coordinates" in geom:
         lon, lat = geom["coordinates"]
-        # По умолчанию "Без названия"
         name = props.get("name") or "Без названия"
-        # Экранируем апострофы, чтобы строка не «поломала» JS
         name_escaped = name.replace("'", "\\'")
-        
         city_markers_js += (
             f"var marker = L.marker([{lat}, {lon}]).bindPopup('{name_escaped}');\n"
             "cityMarkerCluster.addLayer(marker);\n"
         )
 
-
 # --------------------------------------------------------------------------------
-# 7. Генерация итогового HTML + JS
+# 7. Генерация итогового HTML + JS (указываем max: 1.0)
 # --------------------------------------------------------------------------------
 html_template = f"""
 <!DOCTYPE html>
@@ -209,16 +199,8 @@ html_template = f"""
         var heatData = {json.dumps(heat_points)};
         var heatLayer = L.heatLayer(heatData, {{
             radius: 20,
-            blur: 15,
+            blur: 10,
             maxZoom: 10,
-            minOpacity: 0.2,
-            gradient: {{
-                0.0: 'blue',
-                0.4: 'lime',
-                0.6: 'yellow',
-                0.8: 'orange',
-                1.0: 'red'
-            }}
         }});
 
         // ----- Слой "Остановки" (dwelling_time) -----
@@ -229,7 +211,7 @@ html_template = f"""
         var cityMarkerCluster = L.markerClusterGroup();
         {city_markers_js}
 
-        // Собираем оверлеи в словарь для переключения
+        // Собираем оверлеи
         var baseMaps = {{}};
         var overlayMaps = {{
             "Границы регионов": regionLayer,
@@ -241,7 +223,7 @@ html_template = f"""
         // Добавляем контрол переключения слоёв
         L.control.layers(baseMaps, overlayMaps, {{collapsed: false}}).addTo(map);
 
-        // По умолчанию добавим некоторые слои на карту
+        // По умолчанию включаем некоторые слои
         regionLayer.addTo(map);
         cityMarkerCluster.addTo(map);
         heatLayer.addTo(map);
