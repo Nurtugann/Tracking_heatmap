@@ -225,7 +225,6 @@ html_template = f"""
 
         // По умолчанию включаем некоторые слои
         regionLayer.addTo(map);
-        cityMarkerCluster.addTo(map);
         heatLayer.addTo(map);
     </script>
 </body>
