@@ -8,7 +8,7 @@ import os
 import json
 
 st.set_page_config(layout="wide")
-st.title("Теплокарта времени пребывания + Кластеризация населённых пунктов")
+st.title("Теплокарта времени пребывания")
 
 # --- 1) Загрузка данных ---
 @st.cache_data
@@ -78,13 +78,12 @@ def calculate_time_spent(df_local, threshold=1e-4):
             lon_start_i1 = group_data.loc[idx_i1, "longitude_нач"]
             
             dist = np.sqrt((lat_end_i - lat_start_i1)**2 + (lon_end_i - lon_start_i1)**2)
-            if dist < threshold:
-                t_end   = group_data.loc[idx_i, "Конец"]
-                t_start = group_data.loc[idx_i1, "Начало"]
-                if pd.notnull(t_end) and pd.notnull(t_start):
-                    delta_sec = (t_start - t_end).total_seconds()
-                    if delta_sec > 0:
-                        df_copy.at[idx_i, "dwelling_time"] = delta_sec
+            t_end   = group_data.loc[idx_i, "Конец"]
+            t_start = group_data.loc[idx_i1, "Начало"]
+            if pd.notnull(t_end) and pd.notnull(t_start):
+                delta_sec = (t_start - t_end).total_seconds()
+                if delta_sec > 0:
+                    df_copy.at[idx_i, "dwelling_time"] = delta_sec
     return df_copy
 
 df_time = calculate_time_spent(filtered_df, threshold=1e-4)
