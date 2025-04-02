@@ -5,12 +5,11 @@ import pandas as pd
 import datetime
 
 st.set_page_config(layout="wide")
-st.title("🚗 Карта трека + 📊 Отчёт из Wialon")
+st.title("🚗 Карта трека + 📊 Отчёт из Wialon (с GeoJSON)")
 
 TOKEN = "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393"
 BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 
-# Авторизация
 @st.cache_data
 def login(token):
     params = {"svc": "token/login", "params": json.dumps({"token": token})}
@@ -18,7 +17,6 @@ def login(token):
 
 SID = login(TOKEN)
 
-# Получение юнитов и ресурсов
 @st.cache_data
 def get_items(sid, item_type, flags):
     params = {
@@ -48,36 +46,22 @@ if not units or not resources:
     st.stop()
 
 unit_dict = {u["nm"]: u["id"] for u in units}
-res_dict = {r["nm"]: r for r in resources}
+res = resources[0]
+tpl_id = list(res["rep"].values())[0]["id"]
 
-col1, col2, col3, col4 = st.columns(4)
+unit_name = st.selectbox("Юнит:", list(unit_dict.keys()))
+unit_id = unit_dict[unit_name]
 
-with col1:
-    unit_name = st.selectbox("Юнит:", list(unit_dict.keys()))
-    unit_id = unit_dict[unit_name]
+today = datetime.date.today()
+date_range = st.date_input("Период для отчета и трека", (today - datetime.timedelta(days=1), today))
+if isinstance(date_range, tuple):
+    date_from, date_to = date_range
+else:
+    date_from = date_to = date_range
 
-with col2:
-    res_name = st.selectbox("Ресурс:", list(res_dict.keys()))
-    res = res_dict[res_name]
-
-with col3:
-    template_dict = {tpl["n"]: tpl["id"] for tpl in res["rep"].values()}
-    tpl_name = st.selectbox("Отчёт:", list(template_dict.keys()))
-    tpl_id = template_dict[tpl_name]
-
-with col4:
-    interval_labels = {
-        "Последний день": 86400,
-        "Последняя неделя": 86400 * 7,
-        "Последний месяц": 86400 * 30
-    }
-    interval_label = st.selectbox("Интервал:", list(interval_labels.keys()))
-    interval_seconds_value = interval_labels[interval_label]
-
-# Получение трека
-def get_unit_track(sid, unit_id, interval):
-    to_ts = int(datetime.datetime.now().timestamp())
-    from_ts = to_ts - interval
+def get_unit_track(sid, unit_id, date_from, date_to):
+    from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
+    to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
     params = {
         "svc": "messages/load_interval",
         "params": json.dumps({
@@ -96,10 +80,7 @@ def get_unit_track(sid, unit_id, interval):
     ]
     return coords
 
-# Выполнение отчета
-def execute_report(sid, res_id, tpl_id, unit_id, interval):
-    to_time = int(datetime.datetime.now().timestamp())
-    from_time = to_time - interval
+def execute_report(sid, res_id, tpl_id, unit_id, from_ts, to_ts):
     params = {
         "svc": "report/exec_report",
         "params": json.dumps({
@@ -107,54 +88,72 @@ def execute_report(sid, res_id, tpl_id, unit_id, interval):
             "reportTemplateId": tpl_id,
             "reportObjectId": unit_id,
             "reportObjectSecId": 0,
-            "interval": {"from": from_time, "to": to_time, "flags": 0}
+            "interval": {"from": from_ts, "to": to_ts, "flags": 0}
         }),
         "sid": sid
     }
     return requests.get(BASE_URL, params=params).json()
 
-# GeoJSON
+# Загрузка файлов GeoJSON (убедитесь, что файлы лежат в той же папке или укажите верный путь)
 with open("geoBoundaries-KAZ-ADM2.geojson", "r", encoding="utf-8") as f:
     regions_geojson_str = json.dumps(json.load(f))
 
 with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="utf-8") as f:
     cities_geojson_str = json.dumps(json.load(f))
 
-# Кнопка
-if st.button("Выполнить"):
-    report_result = execute_report(SID, res["id"], tpl_id, unit_id, interval_seconds_value)
-    coords = get_unit_track(SID, unit_id, interval_seconds_value)
+if st.button("📥 Выполнить"):
+    from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
+    to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
+
+    report_result = execute_report(SID, res["id"], tpl_id, unit_id, from_ts, to_ts)
+    coords = get_unit_track(SID, unit_id, date_from, date_to)
     last_point = coords[-1] if coords else None
 
-    coords_json = json.dumps(coords)
-    last_point_json = json.dumps(last_point)
-
-    # Отображение отчета
     if "reportResult" in report_result:
         for table_index, table in enumerate(report_result["reportResult"]["tables"]):
             st.subheader(table["label"])
-            rows_resp = requests.get(BASE_URL, params={
+            row_count = table["rows"]
+            row_resp = requests.get(BASE_URL, params={
                 "svc": "report/get_result_rows",
-                "params": json.dumps({"tableIndex": table_index, "indexFrom": 0, "indexTo": table["rows"]}),
+                "params": json.dumps({
+                    "tableIndex": table_index,
+                    "indexFrom": 0,
+                    "indexTo": row_count
+                }),
                 "sid": SID
             }).json()
 
-            if "rows" in rows_resp:
-                headers = table["header"]
-                data = []
-                for row in rows_resp["rows"]:
-                    data.append([
-                        cell.get("t") if isinstance(cell, dict) else cell
-                        for cell in row["c"]
-                    ])
-                df = pd.DataFrame(data, columns=headers)
-                st.dataframe(df, use_container_width=True)
+            # Проверяем, пришёл ли список или словарь
+            if isinstance(row_resp, list):
+                rows = row_resp
+            elif isinstance(row_resp, dict) and "rows" in row_resp:
+                rows = row_resp["rows"]
             else:
-                st.error("Ошибка при получении строк отчёта:")
-                st.json(rows_resp)
+                st.error("❌ Ошибка при получении строк отчёта")
+                st.json(row_resp)
+                continue
+
+            headers = table["header"]
+            parsed_rows = []
+            for row in rows:
+                parsed_cells = []
+                for cell in row["c"]:
+                    if isinstance(cell, dict) and "t" in cell:
+                        parsed_cells.append(cell["t"])
+                    else:
+                        parsed_cells.append(cell)
+                parsed_rows.append(parsed_cells)
+
+            df = pd.DataFrame(parsed_rows, columns=headers)
+            st.dataframe(df, use_container_width=True)
+    else:
+        st.error("❌ Ошибка при выполнении отчёта")
+        st.json(report_result)
 
     # Карта
     car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
+    coords_json = json.dumps(coords)
+    last_point_json = json.dumps(last_point)
 
     html = f"""
     <!DOCTYPE html>
@@ -214,5 +213,4 @@ if st.button("Выполнить"):
     </body>
     </html>
     """
-
     st.components.v1.html(html, height=650, scrolling=False)
