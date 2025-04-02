@@ -1,3 +1,5 @@
+# каждый раз html пересоздается
+
 import streamlit as st
 import folium
 from folium.plugins import HeatMap, MarkerCluster

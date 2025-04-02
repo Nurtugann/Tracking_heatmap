@@ -1,238 +1,218 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
+import requests
 import json
+import pandas as pd
+import datetime
 
 st.set_page_config(layout="wide")
-st.title("🔥 Теплокарта с переключаемыми слоями (JS + Leaflet) - Нормализация")
+st.title("🚗 Карта трека + 📊 Отчёт из Wialon")
 
-# --------------------------------------------------------------------------------
-# 1. Загрузка данных
-# --------------------------------------------------------------------------------
+TOKEN = "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393"
+BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
+
 @st.cache_data
-def load_data():
-    df = pd.read_csv("data.csv")
-    df["Начало"] = pd.to_datetime(df["Начало"], errors="coerce")
-    df["Конец"]  = pd.to_datetime(df["Конец"],  errors="coerce")
-    return df
+def login(token):
+    params = {"svc": "token/login", "params": json.dumps({"token": token})}
+    return requests.get(BASE_URL, params=params).json().get("eid")
 
-df = load_data()
+SID = login(TOKEN)
 
-# --------------------------------------------------------------------------------
-# 2. Фильтры (слайдер дат и выбор агента)
-# --------------------------------------------------------------------------------
-min_time = df["Начало"].min()
-max_time = df["Конец"].max()
+@st.cache_data
+def get_items(sid, item_type, flags):
+    params = {
+        "svc": "core/search_items",
+        "params": json.dumps({
+            "spec": {
+                "itemsType": item_type,
+                "propName": "sys_name",
+                "propValueMask": "*",
+                "sortType": "sys_name",
+                "propType": "property"
+            },
+            "force": 1,
+            "flags": flags,
+            "from": 0,
+            "to": 0
+        }),
+        "sid": sid
+    }
+    return requests.get(BASE_URL, params=params).json().get("items", [])
 
-time_range = st.slider(
-    "Выберите период",
-    min_value=min_time.to_pydatetime(),
-    max_value=max_time.to_pydatetime(),
-    value=(min_time.to_pydatetime(), max_time.to_pydatetime())
-)
+units = get_items(SID, "avl_unit", 1)
+resources = get_items(SID, "avl_resource", 8193)
 
-filtered_df = df[
-    (df["Начало"] >= time_range[0]) &
-    (df["Конец"]  <= time_range[1])
-]
+if not units or not resources:
+    st.warning("Нет данных для отображения.")
+    st.stop()
 
-agents = ["Все"] + sorted(filtered_df["Группировка"].dropna().unique())
-selected_agent = st.selectbox("Агент", agents)
-if selected_agent != "Все":
-    filtered_df = filtered_df[filtered_df["Группировка"] == selected_agent]
+unit_dict = {u["nm"]: u["id"] for u in units}
+res_dict = {r["nm"]: r for r in resources}
 
+col1, col2, col3, col4 = st.columns(4)
 
-# --------------------------------------------------------------------------------
-# 3. Расчёт времени пребывания (наивный подход)
-# --------------------------------------------------------------------------------
-def calculate_time_spent(df_local, threshold=1e-4):
-    """
-    Наивный, простой подход к расчёту dwelling_time,
-    в котором для каждой группы перебираются пары подряд идущих записей.
-    """
-    df_copy = df_local.copy()
-    df_copy.sort_values(by=["Группировка", "Начало"], inplace=True)
-    df_copy["dwelling_time"] = 0.0
-    
-    for group, group_data in df_copy.groupby("Группировка"):
-        indices = group_data.index.to_list()
-        for i in range(len(indices) - 1):
-            i0, i1 = indices[i], indices[i + 1]
-            dist = np.sqrt(
-                (group_data.loc[i0, "latitude_конеч"] - group_data.loc[i1, "latitude_нач"]) ** 2 +
-                (group_data.loc[i0, "longitude_конеч"] - group_data.loc[i1, "longitude_нач"]) ** 2
-            )
-            if dist < threshold:
-                t0 = group_data.loc[i0, "Конец"]
-                t1 = group_data.loc[i1, "Начало"]
-                if pd.notnull(t0) and pd.notnull(t1):
-                    delta = (t1 - t0).total_seconds()
-                    if delta > 0:
-                        df_copy.at[i0, "dwelling_time"] = delta
-    return df_copy
+with col1:
+    unit_name = st.selectbox("Юнит:", list(unit_dict.keys()))
+    unit_id = unit_dict[unit_name]
 
-df_time = calculate_time_spent(filtered_df)
-df_time_sum = df_time.groupby(["latitude_конеч", "longitude_конеч"], dropna=False)["dwelling_time"].sum().reset_index()
+with col2:
+    res_name = st.selectbox("Ресурс:", list(res_dict.keys()))
+    res = res_dict[res_name]
 
+with col3:
+    template_dict = {tpl["n"]: tpl["id"] for tpl in res["rep"].values()}
+    tpl_name = st.selectbox("Отчёт:", list(template_dict.keys()))
+    tpl_id = template_dict[tpl_name]
 
-heat_points = []
-for _, row in df_time_sum.iterrows():
-    lat = row["latitude_конеч"]
-    lon = row["longitude_конеч"]
-    val = row["dwelling_time"]
-    if pd.notnull(lat) and pd.notnull(lon) and val > 0:
-        # Обрезаем снизу и сверху
-        # Нормируем в [0..1]:
-        heat_points.append([lat, lon, 1])
+with col4:
+    interval_labels = {
+        "Последний день": 86400,
+        "Последняя неделя": 86400 * 7,
+        "Последний месяц": 86400 * 30
+    }
+    interval_label = st.selectbox("Интервал:", list(interval_labels.keys()))
+    interval_seconds_value = interval_labels[interval_label]
 
+def get_unit_track(sid, unit_id, interval):
+    to_ts = int(datetime.datetime.now().timestamp())
+    from_ts = to_ts - interval
+    params = {
+        "svc": "messages/load_interval",
+        "params": json.dumps({
+            "itemId": unit_id,
+            "timeFrom": from_ts,
+            "timeTo": to_ts,
+            "flags": 0x1,
+            "flagsMask": 0,
+            "loadCount": 0xffffffff
+        }),
+        "sid": sid
+    }
+    data = requests.get(BASE_URL, params=params).json()
+    coords = [
+        [m["pos"]["y"], m["pos"]["x"]] for m in data.get("messages", []) if m.get("pos")
+    ]
+    return coords
 
-# --------------------------------------------------------------------------------
-# 5. Слой "Остановки" (детальные точки с popup)
-# --------------------------------------------------------------------------------
-detailed_events = df_time[df_time["dwelling_time"] > 0].copy()
-detailed_events["Прибытие"] = detailed_events["Конец"] + pd.to_timedelta(detailed_events["dwelling_time"], unit="s")
-detailed_events["Конец_str"] = detailed_events["Конец"].dt.strftime("%Y-%m-%d %H:%M:%S")
-detailed_events["Прибытие_str"] = detailed_events["Прибытие"].dt.strftime("%Y-%m-%d %H:%M:%S")
+def execute_report(sid, res_id, tpl_id, unit_id, interval):
+    to_time = int(datetime.datetime.now().timestamp())
+    from_time = to_time - interval
+    params = {
+        "svc": "report/exec_report",
+        "params": json.dumps({
+            "reportResourceId": res_id,
+            "reportTemplateId": tpl_id,
+            "reportObjectId": unit_id,
+            "reportObjectSecId": 0,
+            "interval": {"from": from_time, "to": to_time, "flags": 0}
+        }),
+        "sid": sid
+    }
+    return requests.get(BASE_URL, params=params).json()
 
-markers_js = ""
-for _, row in detailed_events.iterrows():
-    lat = row["latitude_конеч"]
-    lon = row["longitude_конеч"]
-    agent = row["Группировка"]
-    popup_text = (
-        f"Агент: {agent}<br>"
-        f"Прибытие: {row['Конец_str']}<br>"
-        f"Отъезд: {row['Прибытие_str']}"
-    )
-    if pd.notnull(lat) and pd.notnull(lon):
-        popup_text_escaped = popup_text.replace("'", "\\'")
-        markers_js += (
-            f"L.circleMarker([{lat}, {lon}], "
-            "{radius: 3, color: 'purple', fillOpacity: 0.8})"
-            f".bindPopup('{popup_text_escaped}')"
-            ".addTo(markerLayer);\n"
-        )
-
-# --------------------------------------------------------------------------------
-# 6. Загрузка geojson: границы регионов и населённые пункты
-# --------------------------------------------------------------------------------
+# GeoJSON слои
 with open("geoBoundaries-KAZ-ADM2.geojson", "r", encoding="utf-8") as f:
-    region_geojson = json.load(f)
-region_geojson_str = json.dumps(region_geojson)
+    regions_geojson_str = json.dumps(json.load(f))
 
 with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="utf-8") as f:
-    city_geojson = json.load(f)
+    cities_geojson_str = json.dumps(json.load(f))
 
-city_markers_js = ""
-for feature in city_geojson.get("features", []):
-    geom = feature.get("geometry", {})
-    props = feature.get("properties", {})
-    if not geom or not props:
-        continue
-    if geom.get("type") == "Point" and "coordinates" in geom:
-        lon, lat = geom["coordinates"]
-        name = props.get("name") or "Без названия"
-        name_escaped = name.replace("'", "\\'")
-        city_markers_js += (
-            f"var marker = L.marker([{lat}, {lon}]).bindPopup('{name_escaped}');\n"
-            "cityMarkerCluster.addLayer(marker);\n"
-        )
+if st.button("Выполнить"):
+    report_result = execute_report(SID, res["id"], tpl_id, unit_id, interval_seconds_value)
+    coords = get_unit_track(SID, unit_id, interval_seconds_value)
+    last_point = coords[-1] if coords else None
 
-# --------------------------------------------------------------------------------
-# 7. Генерация итогового HTML + JS (указываем max: 1.0)
-# --------------------------------------------------------------------------------
-html_template = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8" />
-    <title>Leaflet HeatMap</title>
+    coords_json = json.dumps(coords)
+    last_point_json = json.dumps(last_point)
 
-    <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    # --- Отчёт как таблица ---
+    if "reportResult" in report_result:
+        for table_index, table in enumerate(report_result["reportResult"]["tables"]):
+            st.subheader(table["label"])
+            rows_resp = requests.get(BASE_URL, params={
+                "svc": "report/get_result_rows",
+                "params": json.dumps({"tableIndex": table_index, "indexFrom": 0, "indexTo": table["rows"]}),
+                "sid": SID
+            }).json()
 
-    <!-- Маркер-кластер плагин -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.Default.css" />
+            if "rows" in rows_resp:
+                headers = table["header"]
+                rows = []
 
-    <style>
-        #mapid {{
-            height: 800px;
-            width: 100%;
-        }}
-    </style>
-</head>
-<body>
-    <div id='mapid'></div>
+                for row in rows_resp["rows"]:
+                    values = []
+                    for cell in row["c"]:
+                        if isinstance(cell, dict):
+                            if all(k in cell for k in ("x", "y", "t")):
+                                val = f"x={cell['x']}, y={cell['y']}, t={cell['t']}"
+                            else:
+                                val = ", ".join(f"{k}={v}" for k, v in cell.items())
+                        else:
+                            val = str(cell)
+                        values.append(val)
+                    rows.append(values)
 
-    <!-- Leaflet JS -->
+                df = pd.DataFrame(rows, columns=headers)
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.error("Ошибка при получении строк отчёта")
+
+
+    # --- Карта с последней точкой ---
+    car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
+
+    html = f"""
+    <html>
+    <head>
+        <meta charset="utf-8" />
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.css"/>
+        <style>#map {{ height: 600px; }}</style>
+    </head>
+    <body>
+    <div id="map"></div>
     <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-
-    <!-- Маркер-кластер плагин -->
     <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
-
-    <!-- Leaflet-heat плагин -->
-    <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
-
     <script>
-        // Инициализация карты
-        var map = L.map('mapid').setView([48.0, 68.0], 5);
+        var map = L.map('map').setView([48.0, 68.0], 6);
+        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png').addTo(map);
 
-        // Подложка
-        L.tileLayer('https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}.png', {{
-            attribution: '&copy; OpenStreetMap contributors'
+        var coords = {coords_json};
+        var lastPoint = {last_point_json};
+
+        if (coords.length > 0) {{
+            var track = L.polyline(coords, {{color: 'red'}}).addTo(map);
+            map.fitBounds(track.getBounds());
+
+            if (lastPoint) {{
+                var carIcon = L.icon({{
+                    iconUrl: "{car_icon_url}",
+                    iconSize: [32, 32],
+                    iconAnchor: [16, 16]
+                }});
+                var marker = L.marker([lastPoint[0], lastPoint[1]], {{icon: carIcon}}).addTo(map);
+                marker.bindPopup("🚗 Последняя точка трека").openPopup();
+            }}
+        }}
+
+        var regionLayer = L.geoJSON({regions_geojson_str}, {{
+            style: {{ color: 'black', weight: 1, fillOpacity: 0 }}
         }}).addTo(map);
 
-        // ----- Слой "Границы регионов" -----
-        var regionGeoJson = {region_geojson_str};
-        var regionLayer = L.geoJson(regionGeoJson, {{
-            style: function(feature) {{
-                return {{
-                    color: 'black',
-                    weight: 1,
-                    fillOpacity: 0
-                }};
+        var cityCluster = L.markerClusterGroup();
+        L.geoJSON({cities_geojson_str}, {{
+            pointToLayer: function(feature, latlng) {{
+                return L.marker(latlng).bindPopup(feature.properties.name || "Без названия");
             }}
-        }});
+        }}).addTo(cityCluster);
+        cityCluster.addTo(map);
 
-        // ----- Слой "Теплокарта" -----
-        var heatData = {json.dumps(heat_points)};
-        var heatLayer = L.heatLayer(heatData, {{
-            radius: 20,
-            blur: 10,
-            maxZoom: 10,
-        }});
-
-        // ----- Слой "Остановки" (dwelling_time) -----
-        var markerLayer = L.layerGroup();
-        {markers_js}
-
-        // ----- Слой "Населённые пункты" (кластер) -----
-        var cityMarkerCluster = L.markerClusterGroup();
-        {city_markers_js}
-
-        // Собираем оверлеи
-        var baseMaps = {{}};
-        var overlayMaps = {{
+        var overlays = {{
             "Границы регионов": regionLayer,
-            "Населённые пункты (кластер)": cityMarkerCluster,
-            "Теплокарта (dwelling_time)": heatLayer,
-            "Остановки (подробно)": markerLayer
+            "Населённые пункты": cityCluster
         }};
-
-        // Добавляем контрол переключения слоёв
-        L.control.layers(baseMaps, overlayMaps, {{collapsed: false}}).addTo(map);
-
-        // По умолчанию включаем некоторые слои
-        regionLayer.addTo(map);
-        cityMarkerCluster.addTo(map);
-        heatLayer.addTo(map);
+        L.control.layers(null, overlays, {{collapsed: false}}).addTo(map);
     </script>
-</body>
-</html>
-"""
-
-# --------------------------------------------------------------------------------
-# 8. Отображение карты через Streamlit
-# --------------------------------------------------------------------------------
-st.components.v1.html(html_template, height=800, width=1400)
+    </body>
+    </html>
+    """
+    st.components.v1.html(html, height=650, scrolling=False)
