@@ -5,7 +5,7 @@ import pandas as pd
 import datetime
 
 st.set_page_config(layout="wide")
-st.title("🚗 Карта трека + 📊 Отчёт из Wialon (с GeoJSON)")
+st.title("🚗 Карта трека + 📊 Отчёт из Wialon (с GeoJSON и точками остановки)")
 
 TOKEN = "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393"
 BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
@@ -59,7 +59,8 @@ if isinstance(date_range, tuple):
 else:
     date_from = date_to = date_range
 
-def get_unit_track(sid, unit_id, date_from, date_to):
+# Функция для получения сообщений с дополнительными данными (координаты, время, скорость)
+def get_unit_track_with_details(sid, unit_id, date_from, date_to):
     from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
     to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
     params = {
@@ -68,17 +69,62 @@ def get_unit_track(sid, unit_id, date_from, date_to):
             "itemId": unit_id,
             "timeFrom": from_ts,
             "timeTo": to_ts,
-            "flags": 0x1,
+            "flags": 0x1,  # Флаг для загрузки позиций
             "flagsMask": 0,
             "loadCount": 0xffffffff
         }),
         "sid": sid
     }
     data = requests.get(BASE_URL, params=params).json()
-    coords = [
-        [m["pos"]["y"], m["pos"]["x"]] for m in data.get("messages", []) if m.get("pos")
-    ]
-    return coords
+    points = []
+    for m in data.get("messages", []):
+        if m.get("pos"):
+            points.append({
+                "lat": m["pos"]["y"],
+                "lon": m["pos"]["x"],
+                "time": m.get("t"),   # Время в Unix timestamp
+                "spd": m.get("spd", 0)  # Скорость; если отсутствует, считаем 0
+            })
+    return points
+
+# Функция для выделения точек остановки (группируем сообщения со скоростью 0)
+def get_stop_points(points, time_threshold=300):
+    """
+    Группируем сообщения со скоростью 0, если между сообщениями разница во времени <= time_threshold (в секундах).
+    Для каждой группы вычисляем среднюю координату и время первой записи.
+    """
+    if not points:
+        return []
+    # Сортируем по времени
+    points_sorted = sorted(points, key=lambda p: p["time"])
+    stop_points = []
+    current_group = []
+    for p in points_sorted:
+        # Считаем, что остановка, если скорость меньше или равна 0 (можно задать порог, например, 0.1)
+        if p["spd"] <= 0:
+            if not current_group:
+                current_group.append(p)
+            else:
+                # Если разница во времени с предыдущим сообщением в группе меньше time_threshold, считаем их одной остановкой
+                if p["time"] - current_group[-1]["time"] <= time_threshold:
+                    current_group.append(p)
+                else:
+                    # Завершаем группу: берем среднее положение
+                    avg_lat = sum(x["lat"] for x in current_group) / len(current_group)
+                    avg_lon = sum(x["lon"] for x in current_group) / len(current_group)
+                    stop_points.append({"lat": avg_lat, "lon": avg_lon, "time": current_group[0]["time"]})
+                    current_group = [p]
+        else:
+            if current_group:
+                avg_lat = sum(x["lat"] for x in current_group) / len(current_group)
+                avg_lon = sum(x["lon"] for x in current_group) / len(current_group)
+                stop_points.append({"lat": avg_lat, "lon": avg_lon, "time": current_group[0]["time"]})
+                current_group = []
+    if current_group:
+        avg_lat = sum(x["lat"] for x in current_group) / len(current_group)
+        avg_lon = sum(x["lon"] for x in current_group) / len(current_group)
+        stop_points.append({"lat": avg_lat, "lon": avg_lon, "time": current_group[0]["time"]})
+    return stop_points
 
 def execute_report(sid, res_id, tpl_id, unit_id, from_ts, to_ts):
     params = {
@@ -105,10 +151,19 @@ if st.button("📥 Выполнить"):
     from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
     to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
 
+    # Выполнение отчёта
     report_result = execute_report(SID, res["id"], tpl_id, unit_id, from_ts, to_ts)
-    coords = get_unit_track(SID, unit_id, date_from, date_to)
-    last_point = coords[-1] if coords else None
 
+    # Получаем все сообщения с дополнительными данными
+    detailed_points = get_unit_track_with_details(SID, unit_id, date_from, date_to)
+    # Из них извлекаем координаты для построения маршрута (полилиния)
+    track_coords = [[p["lat"], p["lon"]] for p in detailed_points]
+    # Определяем точки остановки
+    stop_points = get_stop_points(detailed_points, time_threshold=300)  # порог 5 минут
+
+    last_point = track_coords[-1] if track_coords else None
+
+    # Отображение таблиц отчёта
     if "reportResult" in report_result:
         for table_index, table in enumerate(report_result["reportResult"]["tables"]):
             st.subheader(table["label"])
@@ -123,7 +178,6 @@ if st.button("📥 Выполнить"):
                 "sid": SID
             }).json()
 
-            # Проверяем, пришёл ли список или словарь
             if isinstance(row_resp, list):
                 rows = row_resp
             elif isinstance(row_resp, dict) and "rows" in row_resp:
@@ -152,8 +206,11 @@ if st.button("📥 Выполнить"):
 
     # Карта
     car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
-    coords_json = json.dumps(coords)
+    stop_icon_url = "https://cdn-icons-png.flaticon.com/512/252/252025.png"  # Иконка для остановок (пример)
+    
+    coords_json = json.dumps(track_coords)
     last_point_json = json.dumps(last_point)
+    stop_points_json = json.dumps(stop_points)  # список словарей с lat и lon
 
     html = f"""
     <!DOCTYPE html>
@@ -174,11 +231,12 @@ if st.button("📥 Выполнить"):
         var map = L.map('map').setView([48.0, 68.0], 6);
         L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png').addTo(map);
 
-        var coords = {coords_json};
+        var trackCoords = {coords_json};
         var lastPoint = {last_point_json};
+        var stopPoints = {stop_points_json};
 
-        if (coords.length > 0) {{
-            var track = L.polyline(coords, {{color: 'red'}}).addTo(map);
+        if (trackCoords.length > 0) {{
+            var track = L.polyline(trackCoords, {{color: 'red'}}).addTo(map);
             map.fitBounds(track.getBounds());
 
             if (lastPoint) {{
@@ -190,6 +248,19 @@ if st.button("📥 Выполнить"):
                 var marker = L.marker([lastPoint[0], lastPoint[1]], {{icon: carIcon}}).addTo(map);
                 marker.bindPopup("🚗 Последняя точка трека").openPopup();
             }}
+        }}
+
+        // Отображение точек остановок
+        if (stopPoints.length > 0) {{
+            var stopIcon = L.icon({{
+                iconUrl: "{stop_icon_url}",
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+            }});
+            stopPoints.forEach(function(pt) {{
+                var marker = L.marker([pt.lat, pt.lon], {{icon: stopIcon}}).addTo(map);
+                marker.bindPopup("⏹ Остановка, время: " + new Date(pt.time * 1000).toLocaleString());
+            }});
         }}
 
         var regionLayer = L.geoJSON({regions_geojson_str}, {{

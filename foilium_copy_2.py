@@ -1,4 +1,4 @@
-# каждый раз html пересоздается
+# каждый раз html пересоздается FOILIUM
 
 import streamlit as st
 import folium
