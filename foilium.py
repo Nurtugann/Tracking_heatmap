@@ -3,9 +3,11 @@ import requests
 import json
 import pandas as pd
 import datetime
+import geopandas as gpd
+from shapely.geometry import Point
 
 st.set_page_config(layout="wide")
-st.title("🚗 Карта трека + 📊 Отчёт из Wialon (с GeoJSON и точками остановки)")
+st.title("🚗 Карта трека + 📊 Отчёт из Wialon (с переходами между регионами)")
 
 TOKEN = "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393"
 BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
@@ -59,7 +61,6 @@ if isinstance(date_range, tuple):
 else:
     date_from = date_to = date_range
 
-# Функция для получения сообщений с дополнительными данными (координаты, время, скорость)
 def get_unit_track_with_details(sid, unit_id, date_from, date_to):
     from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
     to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
@@ -69,7 +70,7 @@ def get_unit_track_with_details(sid, unit_id, date_from, date_to):
             "itemId": unit_id,
             "timeFrom": from_ts,
             "timeTo": to_ts,
-            "flags": 0x1,  # Флаг для загрузки позиций
+            "flags": 0x1,
             "flagsMask": 0,
             "loadCount": 0xffffffff
         }),
@@ -82,49 +83,10 @@ def get_unit_track_with_details(sid, unit_id, date_from, date_to):
             points.append({
                 "lat": m["pos"]["y"],
                 "lon": m["pos"]["x"],
-                "time": m.get("t"),   # Время в Unix timestamp
-                "spd": m.get("spd", 0)  # Скорость; если отсутствует, считаем 0
+                "time": m.get("t"),
+                "spd": m.get("spd", 0)
             })
     return points
-
-# Функция для выделения точек остановки (группируем сообщения со скоростью 0)
-def get_stop_points(points, time_threshold=300):
-    """
-    Группируем сообщения со скоростью 0, если между сообщениями разница во времени <= time_threshold (в секундах).
-    Для каждой группы вычисляем среднюю координату и время первой записи.
-    """
-    if not points:
-        return []
-    # Сортируем по времени
-    points_sorted = sorted(points, key=lambda p: p["time"])
-    stop_points = []
-    current_group = []
-    for p in points_sorted:
-        # Считаем, что остановка, если скорость меньше или равна 0 (можно задать порог, например, 0.1)
-        if p["spd"] <= 0:
-            if not current_group:
-                current_group.append(p)
-            else:
-                # Если разница во времени с предыдущим сообщением в группе меньше time_threshold, считаем их одной остановкой
-                if p["time"] - current_group[-1]["time"] <= time_threshold:
-                    current_group.append(p)
-                else:
-                    # Завершаем группу: берем среднее положение
-                    avg_lat = sum(x["lat"] for x in current_group) / len(current_group)
-                    avg_lon = sum(x["lon"] for x in current_group) / len(current_group)
-                    stop_points.append({"lat": avg_lat, "lon": avg_lon, "time": current_group[0]["time"]})
-                    current_group = [p]
-        else:
-            if current_group:
-                avg_lat = sum(x["lat"] for x in current_group) / len(current_group)
-                avg_lon = sum(x["lon"] for x in current_group) / len(current_group)
-                stop_points.append({"lat": avg_lat, "lon": avg_lon, "time": current_group[0]["time"]})
-                current_group = []
-    if current_group:
-        avg_lat = sum(x["lat"] for x in current_group) / len(current_group)
-        avg_lon = sum(x["lon"] for x in current_group) / len(current_group)
-        stop_points.append({"lat": avg_lat, "lon": avg_lon, "time": current_group[0]["time"]})
-    return stop_points
 
 def execute_report(sid, res_id, tpl_id, unit_id, from_ts, to_ts):
     params = {
@@ -140,7 +102,43 @@ def execute_report(sid, res_id, tpl_id, unit_id, from_ts, to_ts):
     }
     return requests.get(BASE_URL, params=params).json()
 
-# Загрузка файлов GeoJSON (убедитесь, что файлы лежат в той же папке или укажите верный путь)
+def detect_region_crossings(detailed_points, regions_geojson_path):
+    if not detailed_points:
+        return []
+
+    df = pd.DataFrame(detailed_points)
+    df["datetime"] = pd.to_datetime(df["time"], unit="s")
+    df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
+    regions = gpd.read_file(regions_geojson_path)
+    gdf_points = gpd.GeoDataFrame(df, geometry="geometry", crs=regions.crs)
+
+    def get_region_name(point):
+        for _, region in regions.iterrows():
+            if region["geometry"].contains(point):
+                return region["shapeName"]
+        return None
+
+    # Назначаем регион
+    gdf_points["region"] = gdf_points["geometry"].apply(get_region_name)
+    gdf_points = gdf_points.sort_values(by="time")
+
+    # Оставляем только строки, где регион отличается от предыдущего
+    changes = gdf_points[gdf_points["region"] != gdf_points["region"].shift()]
+    changes = changes.reset_index(drop=True)
+
+    crossings = []
+    for i in range(1, len(changes)):
+        crossings.append({
+            "from_region": changes.loc[i - 1, "region"],
+            "to_region": changes.loc[i, "region"],
+            "transition_time": changes.loc[i, "datetime"],
+            "lat": changes.loc[i, "lat"],
+            "lon": changes.loc[i, "lon"]
+        })
+
+    return crossings
+
+
 with open("geoBoundaries-KAZ-ADM2.geojson", "r", encoding="utf-8") as f:
     regions_geojson_str = json.dumps(json.load(f))
 
@@ -151,19 +149,17 @@ if st.button("📥 Выполнить"):
     from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
     to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
 
-    # Выполнение отчёта
     report_result = execute_report(SID, res["id"], tpl_id, unit_id, from_ts, to_ts)
-
-    # Получаем все сообщения с дополнительными данными
     detailed_points = get_unit_track_with_details(SID, unit_id, date_from, date_to)
-    # Из них извлекаем координаты для построения маршрута (полилиния)
     track_coords = [[p["lat"], p["lon"]] for p in detailed_points]
-    # Определяем точки остановки
-    stop_points = get_stop_points(detailed_points, time_threshold=300)  # порог 5 минут
-
     last_point = track_coords[-1] if track_coords else None
 
-    # Отображение таблиц отчёта
+    crossings = detect_region_crossings(detailed_points, "geoBoundaries-KAZ-ADM2.geojson")
+
+    if crossings:
+        st.subheader("⛳ Переходы между регионами")
+        st.dataframe(pd.DataFrame(crossings))
+
     if "reportResult" in report_result:
         for table_index, table in enumerate(report_result["reportResult"]["tables"]):
             st.subheader(table["label"])
@@ -178,24 +174,13 @@ if st.button("📥 Выполнить"):
                 "sid": SID
             }).json()
 
-            if isinstance(row_resp, list):
-                rows = row_resp
-            elif isinstance(row_resp, dict) and "rows" in row_resp:
-                rows = row_resp["rows"]
-            else:
-                st.error("❌ Ошибка при получении строк отчёта")
-                st.json(row_resp)
-                continue
-
+            rows = row_resp["rows"] if isinstance(row_resp, dict) and "rows" in row_resp else row_resp
             headers = table["header"]
             parsed_rows = []
             for row in rows:
                 parsed_cells = []
                 for cell in row["c"]:
-                    if isinstance(cell, dict) and "t" in cell:
-                        parsed_cells.append(cell["t"])
-                    else:
-                        parsed_cells.append(cell)
+                    parsed_cells.append(cell["t"] if isinstance(cell, dict) and "t" in cell else cell)
                 parsed_rows.append(parsed_cells)
 
             df = pd.DataFrame(parsed_rows, columns=headers)
@@ -204,13 +189,9 @@ if st.button("📥 Выполнить"):
         st.error("❌ Ошибка при выполнении отчёта")
         st.json(report_result)
 
-    # Карта
     car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
-    stop_icon_url = "https://cdn-icons-png.flaticon.com/512/252/252025.png"  # Иконка для остановок (пример)
-    
     coords_json = json.dumps(track_coords)
     last_point_json = json.dumps(last_point)
-    stop_points_json = json.dumps(stop_points)  # список словарей с lat и lon
 
     html = f"""
     <!DOCTYPE html>
@@ -219,7 +200,13 @@ if st.button("📥 Выполнить"):
         <meta charset="utf-8" />
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
         <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.css"/>
-        <style>#map {{ height: 600px; }}</style>
+        <style>#map {{ height: 600px; }}
+              .region-label {{
+                  font-size: 14px;
+                  font-weight: bold;
+                  color: #333;
+              }}
+        </style>
     </head>
     <body>
     <div id="map"></div>
@@ -233,7 +220,6 @@ if st.button("📥 Выполнить"):
 
         var trackCoords = {coords_json};
         var lastPoint = {last_point_json};
-        var stopPoints = {stop_points_json};
 
         if (trackCoords.length > 0) {{
             var track = L.polyline(trackCoords, {{color: 'red'}}).addTo(map);
@@ -250,21 +236,17 @@ if st.button("📥 Выполнить"):
             }}
         }}
 
-        // Отображение точек остановок
-        if (stopPoints.length > 0) {{
-            var stopIcon = L.icon({{
-                iconUrl: "{stop_icon_url}",
-                iconSize: [24, 24],
-                iconAnchor: [12, 12]
-            }});
-            stopPoints.forEach(function(pt) {{
-                var marker = L.marker([pt.lat, pt.lon], {{icon: stopIcon}}).addTo(map);
-                marker.bindPopup("⏹ Остановка, время: " + new Date(pt.time * 1000).toLocaleString());
-            }});
-        }}
-
         var regionLayer = L.geoJSON({regions_geojson_str}, {{
-            style: {{ color: 'black', weight: 1, fillOpacity: 0 }}
+            style: {{ color: 'black', weight: 1, fillOpacity: 0 }},
+            onEachFeature: function(feature, layer) {{
+                if (feature.properties && feature.properties.shapeName) {{
+                    layer.bindTooltip(feature.properties.shapeName, {{
+                        permanent: true,
+                        direction: 'center',
+                        className: 'region-label'
+                    }});
+                }}
+            }}
         }}).addTo(map);
 
         var cityCluster = L.markerClusterGroup();
