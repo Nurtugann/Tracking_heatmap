@@ -103,11 +103,8 @@ def execute_report(sid, res_id, tpl_id, unit_id, from_ts, to_ts):
     return requests.get(BASE_URL, params=params).json()
 
 def detect_region_crossings(detailed_points, regions_geojson_path):
-    if not detailed_points:
-        return []
-
     df = pd.DataFrame(detailed_points)
-    df["datetime"] = pd.to_datetime(df["time"], unit="s")
+    df["datetime"] = pd.to_datetime(df["time"], unit="s") + pd.Timedelta(hours=5)
     df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
     regions = gpd.read_file(regions_geojson_path)
     gdf_points = gpd.GeoDataFrame(df, geometry="geometry", crs=regions.crs)
@@ -118,26 +115,26 @@ def detect_region_crossings(detailed_points, regions_geojson_path):
                 return region["shapeName"]
         return None
 
-    # Назначаем регион
     gdf_points["region"] = gdf_points["geometry"].apply(get_region_name)
     gdf_points = gdf_points.sort_values(by="time")
 
-    # Оставляем только строки, где регион отличается от предыдущего
-    changes = gdf_points[gdf_points["region"] != gdf_points["region"].shift()]
-    changes = changes.reset_index(drop=True)
-
     crossings = []
-    for i in range(1, len(changes)):
-        crossings.append({
-            "from_region": changes.loc[i - 1, "region"],
-            "to_region": changes.loc[i, "region"],
-            "transition_time": changes.loc[i, "datetime"],
-            "lat": changes.loc[i, "lat"],
-            "lon": changes.loc[i, "lon"]
-        })
-
+    prev_region = None
+    for idx, row in gdf_points.iterrows():
+        cur_region = row["region"]
+        if prev_region is None:
+            prev_region = cur_region
+            continue
+        if cur_region != prev_region:
+            crossings.append({
+                "from_region": prev_region,
+                "to_region": cur_region,
+                "transition_time": (datetime.datetime.fromtimestamp(row["time"])).strftime("%Y-%m-%d %H:%M:%S"),
+                "lat": row["lat"],
+                "lon": row["lon"]
+            })
+            prev_region = cur_region
     return crossings
-
 
 with open("geoBoundaries-KAZ-ADM2.geojson", "r", encoding="utf-8") as f:
     regions_geojson_str = json.dumps(json.load(f))
@@ -145,7 +142,7 @@ with open("geoBoundaries-KAZ-ADM2.geojson", "r", encoding="utf-8") as f:
 with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="utf-8") as f:
     cities_geojson_str = json.dumps(json.load(f))
 
-if st.button("📥 Выполнить"):
+if st.button("📅 Выполнить"):
     from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
     to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
 
@@ -180,7 +177,14 @@ if st.button("📥 Выполнить"):
             for row in rows:
                 parsed_cells = []
                 for cell in row["c"]:
-                    parsed_cells.append(cell["t"] if isinstance(cell, dict) and "t" in cell else cell)
+                    value = cell["t"] if isinstance(cell, dict) and "t" in cell else cell
+                    if isinstance(value, str) and ":" in value and "-" in value:
+                        try:
+                            dt = datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
+                            value = dt.strftime("%Y-%m-%d %H:%M:%S")
+                        except:
+                            pass
+                    parsed_cells.append(value)
                 parsed_rows.append(parsed_cells)
 
             df = pd.DataFrame(parsed_rows, columns=headers)
@@ -239,8 +243,8 @@ if st.button("📥 Выполнить"):
         var regionLayer = L.geoJSON({regions_geojson_str}, {{
             style: {{ color: 'black', weight: 1, fillOpacity: 0 }},
             onEachFeature: function(feature, layer) {{
-                if (feature.properties && feature.properties.shapeName) {{
-                    layer.bindTooltip(feature.properties.shapeName, {{
+                if (feature.properties && feature.properties.name) {{
+                    layer.bindTooltip(feature.properties.name, {{
                         permanent: true,
                         direction: 'center',
                         className: 'region-label'
