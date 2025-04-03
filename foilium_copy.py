@@ -103,12 +103,20 @@ def execute_report(sid, res_id, tpl_id, unit_id, from_ts, to_ts):
     return requests.get(BASE_URL, params=params).json()
 
 def detect_region_crossings(detailed_points, regions_geojson_path):
+    # Проверка наличия данных и нужных ключей
+    if not detailed_points or "time" not in detailed_points[0]:
+        return []
+
+    # Преобразуем данные в DataFrame
     df = pd.DataFrame(detailed_points)
     df["datetime"] = pd.to_datetime(df["time"], unit="s") + pd.Timedelta(hours=5)
     df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
+
+    # Загрузка границ регионов
     regions = gpd.read_file(regions_geojson_path)
     gdf_points = gpd.GeoDataFrame(df, geometry="geometry", crs=regions.crs)
 
+    # Функция определения региона
     def get_region_name(point):
         for _, region in regions.iterrows():
             if region["geometry"].contains(point):
@@ -116,7 +124,7 @@ def detect_region_crossings(detailed_points, regions_geojson_path):
         return None
 
     gdf_points["region"] = gdf_points["geometry"].apply(get_region_name)
-    gdf_points = gdf_points.sort_values(by="time")
+    gdf_points = gdf_points.sort_values(by="datetime")
 
     crossings = []
     prev_region = None
@@ -129,11 +137,12 @@ def detect_region_crossings(detailed_points, regions_geojson_path):
             crossings.append({
                 "from_region": prev_region,
                 "to_region": cur_region,
-                "transition_time": (datetime.datetime.fromtimestamp(row["time"])).strftime("%Y-%m-%d %H:%M:%S"),
+                "transition_time": row["datetime"].strftime("%Y-%m-%d %H:%M:%S"),
                 "lat": row["lat"],
                 "lon": row["lon"]
             })
             prev_region = cur_region
+
     return crossings
 
 with open("geoBoundaries-KAZ-ADM2.geojson", "r", encoding="utf-8") as f:
@@ -243,8 +252,8 @@ if st.button("📅 Выполнить"):
         var regionLayer = L.geoJSON({regions_geojson_str}, {{
             style: {{ color: 'black', weight: 1, fillOpacity: 0 }},
             onEachFeature: function(feature, layer) {{
-                if (feature.properties && feature.properties.name) {{
-                    layer.bindTooltip(feature.properties.name, {{
+                if (feature.properties && feature.properties.shapeName) {{
+                    layer.bindTooltip(feature.properties.shapeName, {{
                         permanent: true,
                         direction: 'center',
                         className: 'region-label'
