@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Wialon Playground - Execute custom report</title>
+    <script type="text/javascript" src="//code.jquery.com/jquery-latest.min.js"></script>
+    <script type="text/javascript" src="//hst-api.wialon.host/wsdk/script/wialon.js"></script>
+</head>
+<body>
+<style>
+  td, th { border: 1px solid #c6c6c6; }
+  .wrap { max-height:150px; overflow-y: auto; }
+  .odd, th { background:#EEE; border: 1px solid #c6c6c6; }
+  ul { list-style: none; margin:0; padding:0; display:block; overflow-y: auto; max-height: 200px; width: 300px; }
+  label { cursor: pointer; }
+</style>
+
+<table>
+    <tr>
+        <td>Select resource and table:</td>
+        <td>
+            <select id="res"></select>
+            <select id="templ">
+                <option value="unit_trips">Trips</option>
+                <option value="unit_stays">Stays</option>
+            </select>
+        </td>
+    </tr>
+    <!-- Удалён блок выбора юнита -->
+    <tr>
+        <td>Select time interval:</td>
+        <td>
+            <select id="interval">
+                <option value="86400">Last day</option>
+                <option value="604800">Last week</option>
+                <option value="2592000">Last month</option>
+            </select>
+        </td>
+    </tr>
+    <tr>
+        <td>Report Columns:</td>
+        <td>
+            <ul id="columns"></ul>
+        </td>
+    </tr>
+    <tr>
+        <td colspan="2" style="text-align:center;">
+            <input type="button" value="Draw map and execute reports" id="exec_btn"/>
+        </td>
+    </tr>
+</table>
+<div id="log"></div>
+
+<script type="text/javascript">
+function msg(text) {
+    $("#log").prepend(text + "<br/>");
+}
+
+function init() {
+    var res_flags = wialon.item.Item.dataFlag.base | wialon.item.Resource.dataFlag.reports;
+    var unit_flags = wialon.item.Item.dataFlag.base;
+
+    var sess = wialon.core.Session.getInstance();
+    sess.loadLibrary("resourceReports");
+    sess.updateDataFlags([
+        { type: "type", data: "avl_resource", flags: res_flags, mode: 0 },
+        { type: "type", data: "avl_unit", flags: unit_flags, mode: 0 }
+    ], function(code) {
+        if (code) { msg(wialon.core.Errors.getErrorText(code)); return; }
+
+        // Загружаем ресурсы
+        var res = sess.getItems("avl_resource");
+        if (!res.length) { msg("Resources not found"); return; }
+        for (var i = 0; i < res.length; i++) {
+            $("#res").append("<option value='" + res[i].getId() + "'>" + res[i].getName() + "</option>");
+        }
+
+        // Загружаем юниты
+        var units = sess.getItems("avl_unit");
+        if (!units.length) { msg("Units not found"); return; }
+        // Сохраняем сопоставление id -> имя для использования в отчётах
+        window.unitNameMap = {};
+        for (var i = 0; i < units.length; i++){
+            window.unitNameMap[units[i].getId()] = units[i].getName();
+        }
+    });
+
+    drawCheckboxes();
+    $('#templ').change(drawCheckboxes);
+}
+
+function drawCheckboxes() {
+    wialon.core.Session.getInstance().getReportTables(function (code, data) {
+        var selectedTmpl = $("#templ").val();
+        var html = '';
+        for (var i = 0; i < data.length; i++) {
+            if (data[i].n === selectedTmpl) {
+                var col = data[i].col;
+                for (var j = 0; j < col.length; j++){
+                    if (col[j].l !== '' && col[j].n !== '') {
+                        let checked = ["Beginning", "Initial location", "Initial coordinates", "End", "Final location", "Final coordinates", "Duration"].includes(col[j].n) ? "checked" : "";
+                        html += '<li><input class="rep_col" type="checkbox" id="' + col[j].n + '" ' + checked + '/>' +
+                                '<label for="' + col[j].n + '">' + col[j].l + '</label></li>';
+                    }
+                }
+            }
+        }
+        $('#columns').html(html);
+    });
+}
+
+// Функция для отрисовки карты для выбранного юнита.
+// Теперь вместо выбора юнита берём первый unit из window.preselectedUnits.
+function drawMap() {
+    if (!window.preselectedUnits || window.preselectedUnits.length === 0) {
+        msg("No unit provided from Streamlit for map drawing.");
+        return;
+    }
+    var unit_id = window.preselectedUnits[0];
+    // Здесь можно вызвать функцию для построения карты, используя unit_id.
+    // Например, если карта рисуется через Leaflet, можно создать соответствующий скрипт.
+    msg("Map drawn for unit: " + (window.unitNameMap[unit_id] || unit_id));
+}
+
+function executeReports() {
+    var id_res = $("#res").val(),
+        templ = $("#templ").val(),
+        // Берем выбранные юниты для отчётов из window.preselectedUnits, переданных из Streamlit
+        selectedUnits = window.preselectedUnits,
+        time = $("#interval").val();
+
+    if (!id_res || !selectedUnits || selectedUnits.length === 0) {
+        msg("Select resource and at least one unit for reports");
+        return;
+    }
+
+    var sess = wialon.core.Session.getInstance();
+    var res = sess.getItem(id_res);
+    var to = sess.getServerTime();
+    var from = to - parseInt(time, 10);
+
+    // Получаем выбранные столбцы
+    var columns = $("ul li .rep_col:checked");
+    var c = "", cl = "";
+    for (var i = 0; i < columns.length; i++) {
+        c += (c === "" ? "" : ",") + columns[i].id;
+        cl += (cl === "" ? "" : ",") + $(columns[i].nextSibling).text();
+    }
+
+    $("#exec_btn").prop("disabled", true);
+
+    // Формируем шаблон отчёта
+    var template = {
+        "id": 0,
+        "n": templ,
+        "ct": "avl_unit",
+        "p": "",
+        "tbl": [{
+            "n": templ,
+            "l": $("#templ option[value='" + templ + "']").text(),
+            "c": c,
+            "cl": cl,
+            "s": "",
+            "sl": "",
+            "p": "",
+            "sch": {"f1":0, "f2":0, "t1":0, "t2":0, "m":0, "y":0, "w":0},
+            "f": 0
+        }]
+    };
+
+    // Запускаем отчёт для каждого выбранного юнита
+    selectedUnits.forEach(function(unit_id) {
+        res.execReport(template, unit_id, 0, { from: from, to: to, flags: wialon.item.MReport.intervalFlag.absolute },
+        function(code, data) {
+            if (code) {
+                msg("Unit " + unit_id + ": " + wialon.core.Errors.getErrorText(code));
+                return;
+            }
+            if (!data.getTables().length) {
+                msg("<b>Unit " + (window.unitNameMap[unit_id] || unit_id) + ": No data generated</b>");
+                return;
+            }
+            msg("<b>Report for Unit " + (window.unitNameMap[unit_id] || unit_id) + ":</b>");
+            showReportResult(data);
+        });
+    });
+
+    $("#exec_btn").prop("disabled", false);
+}
+
+function showReportResult(result) {
+    var tables = result.getTables();
+    if (!tables) return;
+    for (var i = 0; i < tables.length; i++) {
+        var html = "<b>" + tables[i].label + "</b><div class='wrap'><table style='width:100%'>";
+        var headers = tables[i].header;
+        html += "<tr>";
+        for (var j = 0; j < headers.length; j++)
+            html += "<th>" + headers[j] + "</th>";
+        html += "</tr>";
+        result.getTableRows(i, 0, tables[i].rows, function(code, rows) {
+            if (code) { msg(wialon.core.Errors.getErrorText(code)); return; }
+            for (var j in rows) {
+                if (!rows[j].c) continue;
+                html += "<tr" + (j % 2 == 1 ? " class='odd'" : "") + ">";
+                for (var k = 0; k < rows[j].c.length; k++)
+                    html += "<td>" + getTableValue(rows[j].c[k]) + "</td>";
+                html += "</tr>";
+            }
+            html += "</table></div>";
+            msg(html);
+        });
+    }
+}
+
+function getTableValue(data) {
+    if (typeof data == "object")
+        return data.t || "";
+    return data;
+}
+
+$(document).ready(function() {
+    $("#exec_btn").click(function() {
+        // Сначала рисуем карту для выбранного юнита (из window.preselectedUnits)
+        drawMap();
+        // Затем вызываем отчёты для всех юнитов из window.preselectedUnits
+        executeReports();
+    });
+    wialon.core.Session.getInstance().initSession("https://hst-api.wialon.host");
+    wialon.core.Session.getInstance().loginToken(
+        "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393", 
+        "", 
+        function(code) {
+            if (code) { msg(wialon.core.Errors.getErrorText(code)); return; }
+            msg("Logged successfully");
+            init();
+        }
+    );
+});
+</script>
+</body>
+</html>
