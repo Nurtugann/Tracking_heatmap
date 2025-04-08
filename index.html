@@ -54,8 +54,11 @@
 <script type="text/javascript">
 // Функция вывода логов в div #log
 function msg(text) {
-    $("#log").prepend(text + "<br/>");
+    $("#log").append(text + "<br/>");
+    // Прокрутка вниз
+    $("#log").scrollTop($("#log")[0].scrollHeight);
 }
+
 
 function init() {
     var res_flags = wialon.item.Item.dataFlag.base | wialon.item.Resource.dataFlag.reports;
