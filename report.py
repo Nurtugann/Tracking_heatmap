@@ -297,4 +297,4 @@ if st.button("🚀 Запустить отчёты и карту"):
             <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
         </head>
         <body>{map_html}</body></html>
-        """, height=400)
+        """, height=800)
