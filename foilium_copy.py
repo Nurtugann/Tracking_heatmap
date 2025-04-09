@@ -6,6 +6,7 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Point
 
+st.cache_data.clear()
 st.set_page_config(layout="wide")
 st.title("🚗 Карта трека + 📊 Отчёты + 🗺️ Переходы регионов (по нескольким юнитам)")
 

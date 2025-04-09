@@ -6,6 +6,7 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Point
 
+st.cache_data.clear()
 st.set_page_config(layout="wide")
 st.title("🚗 Карта трека + 📊 Отчёты + 🗺️ Переходы регионов (по нескольким юнитам)")
 
@@ -146,6 +147,21 @@ with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="u
     cities_geojson_str = json.dumps(json.load(f))
 
 if st.button("🚀 Запустить отчёты и карту"):
+    # Для интеграции с Wialon-репортом через index.html
+    unit_ids = [unit_dict[name] for name in selected_units]
+    units_json = json.dumps(unit_ids)
+
+    with open("index.html", "r", encoding="utf-8") as f:
+        html = f.read()
+
+    injected_js = f"""
+    <script>
+    window.preselectedUnits = {units_json};
+    </script>
+    """
+    st.markdown("🔽 Ниже откроется Wialon-репорт для выбора и запуска произвольных отчётов:")
+    st.components.v1.html(html + injected_js, height=800, scrolling=True)
+
     for unit_name in selected_units:
         unit_id = unit_dict[unit_name]
         st.markdown(f"## 🚘 Юнит: {unit_name}")
@@ -190,19 +206,21 @@ if st.button("🚀 Запустить отчёты и карту"):
             st.warning("❌ Ошибка в отчёте")
             st.json(report_result)
 
-        # Карта
+        # --- Карта с управляемыми слоями ---
         car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
         coords_json = json.dumps(coords)
         last_point_json = json.dumps(last)
 
-        html = f"""
+        map_html = f"""
         <div id="map_{unit_name}" style="height: 600px;"></div>
         <script>
+            // Инициализация карты
             var map = L.map('map_{unit_name}').setView([48.0, 68.0], 6);
             L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png').addTo(map);
             var coords = {coords_json};
             var last = {last_point_json};
 
+            // Отрисовка трека
             if (coords.length > 0) {{
                 var track = L.polyline(coords, {{color: 'red'}}).addTo(map);
                 map.fitBounds(track.getBounds());
@@ -212,62 +230,72 @@ if st.button("🚀 Запустить отчёты и карту"):
                         iconSize: [32, 32],
                         iconAnchor: [16, 16]
                     }});
-                    L.marker([last[0], last[1]], {{icon: carIcon}}).addTo(map).bindPopup("🚗 Последняя точка");
+                    L.marker([last[0], last[1]], {{icon: carIcon}}).addTo(map)
+                        .bindPopup("🚗 Последняя точка");
                 }}
             }}
 
-            var regionLayer = L.geoJSON({regions_geojson_str}, {{
-                style: {{ color: 'black', weight: 1, fillOpacity: 0 }},
+            // Слой с границами регионов с постоянными подписями
+            var regionsLayer = L.geoJSON({regions_geojson_str}, {{
+                style: function(feature) {{
+                    return {{ color: 'black', weight: 1, fillOpacity: 0 }};
+                }},
                 onEachFeature: function(feature, layer) {{
                     if (feature.properties && feature.properties.shapeName) {{
                         layer.bindTooltip(feature.properties.shapeName, {{
-                            permanent: true, direction: 'center', className: 'region-label'
+                            permanent: true,
+                            direction: 'center',
+                            className: 'region-label'
                         }});
                     }}
                 }}
-            }}).addTo(map);
+            }});
 
-            var cityCluster = L.markerClusterGroup();
-            L.geoJSON({cities_geojson_str}, {{
+            // Слой с пунктами населения (города) с кластеризацией
+            var citiesLayer = L.geoJSON({cities_geojson_str}, {{
                 pointToLayer: function(feature, latlng) {{
-                    return L.marker(latlng).bindPopup(feature.properties.name || "Без названия");
+                    var marker = L.marker(latlng);
+                    if (feature.properties && feature.properties.name) {{
+                        marker.bindPopup(feature.properties.name);
+                    }}
+                    return marker;
                 }}
-            }}).addTo(cityCluster);
-            cityCluster.addTo(map);
+            }});
+            var cityCluster = L.markerClusterGroup();
+            cityCluster.addLayer(citiesLayer);
 
-            L.control.layers(null, {{
-                "Границы регионов": regionLayer,
-                "Города": cityCluster
-            }}, {{collapsed: false}}).addTo(map);
+            // Объект с оверлеями для управления слоями
+            var overlays = {{
+                "Границы регионов": regionsLayer,
+                "Пункты населения": cityCluster
+            }};
+            L.control.layers(null, overlays, {{collapsed: false}}).addTo(map);
+
+            // Добавляем слои по умолчанию
+            regionsLayer.addTo(map);
+            cityCluster.addTo(map);
         </script>
+        <style>
+            .region-label {{
+                background-color: rgba(255, 255, 255, 0.7);
+                border: none;
+                font-size: 12px;
+                padding: 2px;
+            }}
+            .city-label {{
+                background-color: rgba(255, 255, 255, 0.7);
+                border: none;
+                font-size: 10px;
+                padding: 2px;
+            }}
+        </style>
         """
         st.components.v1.html(f"""
         <html>
         <head>
-        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
-        <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-        <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
+            <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+            <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
         </head>
-        <body>{html}</body></html>
-        """, height=400)
-
-    # Дополнительно: список столбцов
-    st.markdown("### 📌 Доступные столбцы в таблице unit_trips")
-    def get_table_columns(sid, resource_id, table_name="unit_trips"):
-        r = requests.get(BASE_URL, params={
-            "svc": "report/get_report_tables",
-            "params": json.dumps({"resourceId": resource_id}),
-            "sid": sid
-        })
-        all_tables = r.json()
-        for table in all_tables:
-            if table.get("n") == table_name:
-                return table.get("col", [])
-        return []
-
-    columns = get_table_columns(SID, res["id"], "unit_trips")
-    if columns:
-        for col in columns:
-            st.markdown(f"- {col['n']} — **{col['l']}**")
-    else:
-        st.warning("❌ Не удалось получить список столбцов.")
+        <body>{map_html}</body></html>
+        """, height=800)
