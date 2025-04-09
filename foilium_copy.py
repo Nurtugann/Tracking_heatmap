@@ -17,30 +17,36 @@ BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 
 @st.cache_data
 def login(token):
-    r = requests.get(BASE_URL, params={
-        "svc": "token/login",
-        "params": json.dumps({"token": token})
-    })
+    r = requests.get(
+        BASE_URL,
+        params={
+            "svc": "token/login",
+            "params": json.dumps({"token": token})
+        }
+    )
     return r.json().get("eid")
 
 @st.cache_data
 def get_items(sid, item_type, flags):
-    r = requests.get(BASE_URL, params={
-        "svc": "core/search_items",
-        "params": json.dumps({
-            "spec": {
-                "itemsType": item_type,
-                "propName": "sys_name",
-                "propValueMask": "*",
-                "sortType": "sys_name"
-            },
-            "force": 1,
-            "flags": flags,
-            "from": 0,
-            "to": 0
-        }),
-        "sid": sid
-    })
+    r = requests.get(
+        BASE_URL,
+        params={
+            "svc": "core/search_items",
+            "params": json.dumps({
+                "spec": {
+                    "itemsType": item_type,
+                    "propName": "sys_name",
+                    "propValueMask": "*",
+                    "sortType": "sys_name"
+                },
+                "force": 1,
+                "flags": flags,
+                "from": 0,
+                "to": 0
+            }),
+            "sid": sid
+        }
+    )
     return r.json().get("items", [])
 
 # Авторизация и получение списка юнитов/ресурсов
@@ -53,7 +59,12 @@ if not resources or not units:
     st.stop()
 
 unit_dict = {u["nm"]: u["id"] for u in units}
-selected_units = st.multiselect("Выберите юниты:", list(unit_dict), default=list(unit_dict)[:1])
+# По умолчанию не выбираем ни один юнит
+selected_units = st.multiselect("Выберите юниты:", list(unit_dict))
+
+if not selected_units:
+    st.warning("Пожалуйста, выберите хотя бы один юнит.")
+    st.stop()
 
 res = resources[0]
 tpl_id = list(res["rep"].values())[0]["id"]
@@ -68,7 +79,7 @@ to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
 def get_track(sid, unit_id):
     """
     Получаем трек юнита через messages/load_interval.
-    Здесь прибавляем 5 часов к значению времени (UTC -> местное)
+    Здесь прибавляем +5 часов к значению времени (UTC -> местное)
     – это значение используется для вычисления переходов между регионами.
     """
     r = requests.get(BASE_URL, params={
@@ -94,7 +105,7 @@ def get_track(sid, unit_id):
                     dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
                     dt = datetime.datetime.fromtimestamp(t)
-                t_local = dt.strftime("%Y-%m-%d %H:%M:%S")
+                t_local = (dt + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 t_local = t
             points.append({
@@ -177,7 +188,7 @@ with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="u
     cities_geojson_str = json.dumps(json.load(f))
 
 if st.button("🚀 Запустить отчёты и карту"):
-    # Встраиваем index.html (Wialon-репорт через JS) – там уже добавлен +5 часов через adjustTime
+    # Встраиваем index.html (Wialon-репорт через JS) – там уже реализована обработка времени с +5 через adjustTime
     unit_ids = [unit_dict[name] for name in selected_units]
     units_json = json.dumps(unit_ids)
     with open("index.html", "r", encoding="utf-8") as f:
@@ -219,8 +230,8 @@ if st.button("🚀 Запустить отчёты и карту"):
                 for row_obj in rows:
                     line = []
                     for cell in row_obj["c"]:
-                        # Для отчётов предполагаем, что время из отчёта приходит в UTC
-                        # и здесь прибавляем +5 часов, чтобы получить местное время.
+                        # Для отчётов предполагаем, что время из отчёта приходит в UTC,
+                        # и здесь прибавляем +5 часов для получения местного времени.
                         if isinstance(cell, dict) and "t" in cell:
                             raw_val = cell["t"]
                         else:
@@ -240,6 +251,10 @@ if st.button("🚀 Запустить отчёты и карту"):
                     parsed_rows.append(line)
 
                 df = pd.DataFrame(parsed_rows, columns=headers)
+                # Если в таблице отдельно заданы колонки "день" и "время", можно объединить их:
+                if "день" in df.columns and "время" in df.columns:
+                    df["время_local"] = pd.to_datetime(df["день"].astype(str) + " " + df["время"].astype(str),
+                                                       format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
                 st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
                 st.dataframe(df, use_container_width=True)
         else:

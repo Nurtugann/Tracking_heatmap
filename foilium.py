@@ -19,7 +19,10 @@ BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 def login(token):
     r = requests.get(
         BASE_URL,
-        params={"svc": "token/login", "params": json.dumps({"token": token})}
+        params={
+            "svc": "token/login",
+            "params": json.dumps({"token": token})
+        }
     )
     return r.json().get("eid")
 
@@ -46,6 +49,7 @@ def get_items(sid, item_type, flags):
     )
     return r.json().get("items", [])
 
+# Авторизация и получение списка юнитов/ресурсов
 SID = login(TOKEN)
 units = get_items(SID, "avl_unit", 1)
 resources = get_items(SID, "avl_resource", 8193)
@@ -55,7 +59,12 @@ if not resources or not units:
     st.stop()
 
 unit_dict = {u["nm"]: u["id"] for u in units}
-selected_units = st.multiselect("Выберите юниты:", list(unit_dict), default=list(unit_dict)[:1])
+# По умолчанию не выбираем ни один юнит
+selected_units = st.multiselect("Выберите юниты:", list(unit_dict))
+
+if not selected_units:
+    st.warning("Пожалуйста, выберите хотя бы один юнит.")
+    st.stop()
 
 res = resources[0]
 tpl_id = list(res["rep"].values())[0]["id"]
@@ -65,12 +74,13 @@ selected_date = st.date_input("Выберите день", today)
 date_from = date_to = selected_date
 
 from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
-to_ts   = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
+to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
 
 def get_track(sid, unit_id):
     """
     Получаем трек юнита через messages/load_interval.
-    Здесь прибавляем 5 часов к значению времени (UTC -> местное).
+    Здесь прибавляем +5 часов к значению времени (UTC -> местное)
+    – это значение используется для вычисления переходов между регионами.
     """
     r = requests.get(BASE_URL, params={
         "svc": "messages/load_interval",
@@ -90,18 +100,18 @@ def get_track(sid, unit_id):
         if m.get("pos"):
             t = m.get("t")
             try:
-                # Если t - строка, пробуем преобразовать по формату, иначе считаем, что это Unix timestamp.
+                # Прибавляем +5 часов к времени из сообщений
                 if isinstance(t, str):
-                    dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
+                    dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
-                    dt = datetime.datetime.fromtimestamp(t) + datetime.timedelta(hours=5)
-                t_local = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    dt = datetime.datetime.fromtimestamp(t)
+                t_local = (dt + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 t_local = t
             points.append({
                 "lat": m["pos"]["y"],
                 "lon": m["pos"]["x"],
-                "time": t_local,  # локальное время с +5 часов
+                "time": t_local,  # уже локальное время (UTC+5)
                 "spd": m.get("spd", 0)
             })
     return points
@@ -142,7 +152,7 @@ def detect_region_crossings(points, regions_geojson_path):
     if not points:
         return []
     df = pd.DataFrame(points)
-    # Здесь "time" уже строковое значение с прибавлением 5 часов
+    # Здесь "time" уже строковое значение с прибавлением +5 часов (из get_track)
     try:
         df["datetime"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S")
     except Exception as e:
@@ -178,7 +188,7 @@ with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="u
     cities_geojson_str = json.dumps(json.load(f))
 
 if st.button("🚀 Запустить отчёты и карту"):
-    # Встраиваем index.html (Wialon-репорт через JS), если нужно:
+    # Встраиваем index.html (Wialon-репорт через JS) – там уже реализована обработка времени с +5 через adjustTime
     unit_ids = [unit_dict[name] for name in selected_units]
     units_json = json.dumps(unit_ids)
     with open("index.html", "r", encoding="utf-8") as f:
@@ -200,6 +210,7 @@ if st.button("🚀 Запустить отчёты и карту"):
         coords = [[p["lat"], p["lon"]] for p in detailed_points]
         last = coords[-1] if coords else None
 
+        # Таблица переходов – данные уже содержат +5 часов (из get_track)
         crossings = detect_region_crossings(detailed_points, "geoBoundaries-KAZ-ADM2.geojson")
         if crossings:
             st.subheader("⛳ Переходы между регионами")
@@ -219,7 +230,8 @@ if st.button("🚀 Запустить отчёты и карту"):
                 for row_obj in rows:
                     line = []
                     for cell in row_obj["c"]:
-                        # Обрабатываем время: пробуем прибавить 5 часов, если значение соответствует формату даты
+                        # Для отчётов предполагаем, что время из отчёта приходит в UTC,
+                        # и здесь прибавляем +5 часов для получения местного времени.
                         if isinstance(cell, dict) and "t" in cell:
                             raw_val = cell["t"]
                         else:
@@ -239,6 +251,10 @@ if st.button("🚀 Запустить отчёты и карту"):
                     parsed_rows.append(line)
 
                 df = pd.DataFrame(parsed_rows, columns=headers)
+                # Если в таблице отдельно заданы колонки "день" и "время", можно объединить их:
+                if "день" in df.columns and "время" in df.columns:
+                    df["время_local"] = pd.to_datetime(df["день"].astype(str) + " " + df["время"].astype(str),
+                                                       format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
                 st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
                 st.dataframe(df, use_container_width=True)
         else:
