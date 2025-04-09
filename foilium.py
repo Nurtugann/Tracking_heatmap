@@ -5,6 +5,7 @@ import datetime
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Point
+import re
 
 st.cache_data.clear()
 st.set_page_config(layout="wide")
@@ -16,27 +17,33 @@ BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 
 @st.cache_data
 def login(token):
-    r = requests.get(BASE_URL, params={"svc": "token/login", "params": json.dumps({"token": token})})
+    r = requests.get(
+        BASE_URL,
+        params={"svc": "token/login", "params": json.dumps({"token": token})}
+    )
     return r.json().get("eid")
 
 @st.cache_data
 def get_items(sid, item_type, flags):
-    r = requests.get(BASE_URL, params={
-        "svc": "core/search_items",
-        "params": json.dumps({
-            "spec": {
-                "itemsType": item_type,
-                "propName": "sys_name",
-                "propValueMask": "*",
-                "sortType": "sys_name"
-            },
-            "force": 1,
-            "flags": flags,
-            "from": 0,
-            "to": 0
-        }),
-        "sid": sid
-    })
+    r = requests.get(
+        BASE_URL,
+        params={
+            "svc": "core/search_items",
+            "params": json.dumps({
+                "spec": {
+                    "itemsType": item_type,
+                    "propName": "sys_name",
+                    "propValueMask": "*",
+                    "sortType": "sys_name"
+                },
+                "force": 1,
+                "flags": flags,
+                "from": 0,
+                "to": 0
+            }),
+            "sid": sid
+        }
+    )
     return r.json().get("items", [])
 
 SID = login(TOKEN)
@@ -58,9 +65,13 @@ selected_date = st.date_input("Выберите день", today)
 date_from = date_to = selected_date
 
 from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
-to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
+to_ts   = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
 
 def get_track(sid, unit_id):
+    """
+    Получаем трек юнита через messages/load_interval.
+    Здесь прибавляем 5 часов к значению времени (UTC -> местное).
+    """
     r = requests.get(BASE_URL, params={
         "svc": "messages/load_interval",
         "params": json.dumps({
@@ -73,13 +84,24 @@ def get_track(sid, unit_id):
         }),
         "sid": sid
     })
+    js = r.json()
     points = []
-    for m in r.json().get("messages", []):
+    for m in js.get("messages", []):
         if m.get("pos"):
+            t = m.get("t")
+            try:
+                # Если t - строка, пробуем преобразовать по формату, иначе считаем, что это Unix timestamp.
+                if isinstance(t, str):
+                    dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
+                else:
+                    dt = datetime.datetime.fromtimestamp(t) + datetime.timedelta(hours=5)
+                t_local = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                t_local = t
             points.append({
                 "lat": m["pos"]["y"],
                 "lon": m["pos"]["x"],
-                "time": m.get("t"),
+                "time": t_local,  # локальное время с +5 часов
                 "spd": m.get("spd", 0)
             })
     return points
@@ -108,23 +130,32 @@ def get_result_rows(sid, table_index, row_count):
         }),
         "sid": sid
     })
-    return r.json()
+    data = r.json()
+    if isinstance(data, dict) and "rows" in data:
+        return data["rows"]
+    elif isinstance(data, list):
+        return data
+    else:
+        return []
 
 def detect_region_crossings(points, regions_geojson_path):
     if not points:
         return []
     df = pd.DataFrame(points)
-    df["datetime"] = pd.to_datetime(df["time"], unit="s") + pd.Timedelta(hours=5)
+    # Здесь "time" уже строковое значение с прибавлением 5 часов
+    try:
+        df["datetime"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        st.warning(f"Ошибка преобразования времени: {e}")
+        df["datetime"] = pd.to_datetime(df["time"], errors='coerce')
     df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
     regions = gpd.read_file(regions_geojson_path)
     gdf = gpd.GeoDataFrame(df, geometry="geometry", crs=regions.crs)
-
     def get_region(point):
         for _, reg in regions.iterrows():
             if reg["geometry"].contains(point):
                 return reg["shapeName"]
         return None
-
     gdf["region"] = gdf["geometry"].apply(get_region)
     crossings = []
     prev = None
@@ -147,13 +178,11 @@ with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="u
     cities_geojson_str = json.dumps(json.load(f))
 
 if st.button("🚀 Запустить отчёты и карту"):
-    # Для интеграции с Wialon-репортом через index.html
+    # Встраиваем index.html (Wialon-репорт через JS), если нужно:
     unit_ids = [unit_dict[name] for name in selected_units]
     units_json = json.dumps(unit_ids)
-
     with open("index.html", "r", encoding="utf-8") as f:
         html = f.read()
-
     injected_js = f"""
     <script>
     window.preselectedUnits = {units_json};
@@ -163,8 +192,8 @@ if st.button("🚀 Запустить отчёты и карту"):
     st.components.v1.html(html + injected_js, height=800, scrolling=True)
 
     for unit_name in selected_units:
-        unit_id = unit_dict[unit_name]
         st.markdown(f"## 🚘 Юнит: {unit_name}")
+        unit_id = unit_dict[unit_name]
 
         report_result = execute_report(SID, res["id"], tpl_id, unit_id)
         detailed_points = get_track(SID, unit_id)
@@ -176,31 +205,41 @@ if st.button("🚀 Запустить отчёты и карту"):
             st.subheader("⛳ Переходы между регионами")
             st.dataframe(pd.DataFrame(crossings))
 
+        # Обработка отчёта (для таблиц unit_trips и unit_trace)
         if "reportResult" in report_result:
             for table_index, table in enumerate(report_result["reportResult"]["tables"]):
-                if table["name"] != "unit_trips":
+                if table["name"] not in ["unit_trips", "unit_trace"]:
                     continue
-
                 row_count = table["rows"]
                 headers = table["header"]
                 data = get_result_rows(SID, table_index, row_count)
+                rows = data  # data уже список
 
-                rows = data["rows"] if isinstance(data, dict) and "rows" in data else data
                 parsed_rows = []
-                for row in rows:
+                for row_obj in rows:
                     line = []
-                    for cell in row["c"]:
-                        val = cell["t"] if isinstance(cell, dict) and "t" in cell else cell
-                        try:
-                            dt = datetime.datetime.strptime(val, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
+                    for cell in row_obj["c"]:
+                        # Обрабатываем время: пробуем прибавить 5 часов, если значение соответствует формату даты
+                        if isinstance(cell, dict) and "t" in cell:
+                            raw_val = cell["t"]
+                        else:
+                            raw_val = cell
+                        if isinstance(raw_val, str) and re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$', raw_val):
+                            try:
+                                dt = datetime.datetime.strptime(raw_val, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
+                                val = dt.strftime("%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                val = raw_val
+                        elif isinstance(raw_val, (int, float)):
+                            dt = datetime.datetime.fromtimestamp(raw_val) + datetime.timedelta(hours=5)
                             val = dt.strftime("%Y-%m-%d %H:%M:%S")
-                        except:
-                            pass
+                        else:
+                            val = raw_val
                         line.append(val)
                     parsed_rows.append(line)
 
                 df = pd.DataFrame(parsed_rows, columns=headers)
-                st.markdown(f"### 📋 Таблица поездок: {unit_name}")
+                st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
                 st.dataframe(df, use_container_width=True)
         else:
             st.warning("❌ Ошибка в отчёте")
@@ -210,17 +249,13 @@ if st.button("🚀 Запустить отчёты и карту"):
         car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
         coords_json = json.dumps(coords)
         last_point_json = json.dumps(last)
-
         map_html = f"""
         <div id="map_{unit_name}" style="height: 600px;"></div>
         <script>
-            // Инициализация карты
             var map = L.map('map_{unit_name}').setView([48.0, 68.0], 6);
             L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png').addTo(map);
             var coords = {coords_json};
             var last = {last_point_json};
-
-            // Отрисовка трека
             if (coords.length > 0) {{
                 var track = L.polyline(coords, {{color: 'red'}}).addTo(map);
                 map.fitBounds(track.getBounds());
@@ -234,8 +269,6 @@ if st.button("🚀 Запустить отчёты и карту"):
                         .bindPopup("🚗 Последняя точка");
                 }}
             }}
-
-            // Слой с границами регионов с постоянными подписями
             var regionsLayer = L.geoJSON({regions_geojson_str}, {{
                 style: function(feature) {{
                     return {{ color: 'black', weight: 1, fillOpacity: 0 }};
@@ -250,8 +283,6 @@ if st.button("🚀 Запустить отчёты и карту"):
                     }}
                 }}
             }});
-
-            // Слой с пунктами населения (города) с кластеризацией
             var citiesLayer = L.geoJSON({cities_geojson_str}, {{
                 pointToLayer: function(feature, latlng) {{
                     var marker = L.marker(latlng);
@@ -263,15 +294,11 @@ if st.button("🚀 Запустить отчёты и карту"):
             }});
             var cityCluster = L.markerClusterGroup();
             cityCluster.addLayer(citiesLayer);
-
-            // Объект с оверлеями для управления слоями
             var overlays = {{
                 "Границы регионов": regionsLayer,
                 "Пункты населения": cityCluster
             }};
             L.control.layers(null, overlays, {{collapsed: false}}).addTo(map);
-
-            // Добавляем слои по умолчанию
             regionsLayer.addTo(map);
             cityCluster.addTo(map);
         </script>

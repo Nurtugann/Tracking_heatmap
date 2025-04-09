@@ -52,316 +52,304 @@
 <div id="log"></div>
 
 <script type="text/javascript">
-// Функция вывода логов в div #log
-function msg(text) {
-    $("#log").append(text + "<br/>");
-    // Прокрутка вниз
-    $("#log").scrollTop($("#log")[0].scrollHeight);
-}
+  // Функция для преобразования строки даты-времени и прибавления 5 часов
+  function adjustTime(timeStr) {
+      // Ожидается формат "YYYY-MM-DD HH:MM:SS"
+      var parts = timeStr.split(/[- :]/);
+      // Создаём дату (месяц в Date начинается с 0)
+      var dt = new Date(parts[0], parts[1]-1, parts[2], parts[3], parts[4], parts[5]);
+      dt.setHours(dt.getHours() + 5);
+      // Форматирование обратно в строку "YYYY-MM-DD HH:MM:SS"
+      var year = dt.getFullYear();
+      var month = ('0' + (dt.getMonth() + 1)).slice(-2);
+      var day = ('0' + dt.getDate()).slice(-2);
+      var hours = ('0' + dt.getHours()).slice(-2);
+      var minutes = ('0' + dt.getMinutes()).slice(-2);
+      var seconds = ('0' + dt.getSeconds()).slice(-2);
+      return year + "-" + month + "-" + day + " " + hours + ":" + minutes + ":" + seconds;
+  }
 
+  // Модифицируем функцию getTableValue, чтобы применять сдвиг +5 часов, если значение выглядит как дата
+  function getTableValue(data) {
+      var val = "";
+      if (typeof data == "object")
+          val = data.t || "";
+      else
+          val = data;
+      // Если значение соответствует формату "YYYY-MM-DD HH:MM:SS", применяем сдвиг
+      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(val)) {
+          return adjustTime(val);
+      }
+      return val;
+  }
 
-function init() {
-    var res_flags = wialon.item.Item.dataFlag.base | wialon.item.Resource.dataFlag.reports;
-    var unit_flags = wialon.item.Item.dataFlag.base;
+  // Функция вывода логов в div #log
+  function msg(text) {
+      $("#log").append(text + "<br/>");
+      // Прокрутка вниз
+      $("#log").scrollTop($("#log")[0].scrollHeight);
+  }
 
-    var sess = wialon.core.Session.getInstance();
-    sess.loadLibrary("resourceReports");
-    sess.updateDataFlags([
-        { type: "type", data: "avl_resource", flags: res_flags, mode: 0 },
-        { type: "type", data: "avl_unit", flags: unit_flags, mode: 0 }
-    ], function(code) {
-        if (code) { msg(wialon.core.Errors.getErrorText(code)); return; }
+  function init() {
+      var res_flags = wialon.item.Item.dataFlag.base | wialon.item.Resource.dataFlag.reports;
+      var unit_flags = wialon.item.Item.dataFlag.base;
 
-        // Загружаем ресурсы
-        var res = sess.getItems("avl_resource");
-        if (!res.length) { msg("Resources not found"); return; }
-        for (var i = 0; i < res.length; i++) {
-            $("#res").append("<option value='" + res[i].getId() + "'>" + res[i].getName() + "</option>");
-        }
+      var sess = wialon.core.Session.getInstance();
+      sess.loadLibrary("resourceReports");
+      sess.updateDataFlags([
+          { type: "type", data: "avl_resource", flags: res_flags, mode: 0 },
+          { type: "type", data: "avl_unit", flags: unit_flags, mode: 0 }
+      ], function(code) {
+          if (code) { msg(wialon.core.Errors.getErrorText(code)); return; }
 
-        // Загружаем юниты
-        var units = sess.getItems("avl_unit");
-        if (!units.length) { msg("Units not found"); return; }
+          // Загружаем ресурсы
+          var res = sess.getItems("avl_resource");
+          if (!res.length) { msg("Resources not found"); return; }
+          for (var i = 0; i < res.length; i++) {
+              $("#res").append("<option value='" + res[i].getId() + "'>" + res[i].getName() + "</option>");
+          }
 
-        // Сохраняем сопоставление id -> имя для отчётов
-        window.unitNameMap = {};
-        for (var i = 0; i < units.length; i++){
-            window.unitNameMap[units[i].getId()] = units[i].getName();
-        }
-    });
+          // Загружаем юниты
+          var units = sess.getItems("avl_unit");
+          if (!units.length) { msg("Units not found"); return; }
 
-    drawCheckboxes();
-    $('#templ').change(drawCheckboxes);
-}
+          // Сохраняем сопоставление id -> имя для отчётов
+          window.unitNameMap = {};
+          for (var i = 0; i < units.length; i++){
+              window.unitNameMap[units[i].getId()] = units[i].getName();
+          }
+      });
 
-/**
- * Функция для отрисовки списка доступных колонок с чекбоксами.
- * Галочки по умолчанию проставляются по массиву defaultCheckedCols
- */
-function drawCheckboxes() {
-    wialon.core.Session.getInstance().getReportTables(function (code, data) {
-        if (code) {
-            msg("Error getReportTables: " + wialon.core.Errors.getErrorText(code));
-            return;
-        }
+      drawCheckboxes();
+      $('#templ').change(drawCheckboxes);
+  }
 
-        var selectedTmpl = $("#templ").val();
-        var html = '';
+  function drawCheckboxes() {
+      wialon.core.Session.getInstance().getReportTables(function (code, data) {
+          if (code) {
+              msg("Error getReportTables: " + wialon.core.Errors.getErrorText(code));
+              return;
+          }
 
-        // Массив названий колонок, которые мы хотим отмечать по умолчанию
-        let defaultCheckedCols = [
-		"time_begin",         // Beginning
-		"location_begin",     // Initial location
-        "coord_begin",
-		"time_end",           // End
-		"location_end",       // Final location
-        "coord_end",
-		"duration_ival",      // Total time
-		"duration_next",      // Following off-time
-		"mileage",            // Mileage
-		"absolute_mileage_end" // Final mileage
-		];
+          var selectedTmpl = $("#templ").val();
+          var html = '';
+          let defaultCheckedCols = [
+              "time_begin",         // Beginning
+              "location_begin",     // Initial location
+              "coord_begin",
+              "time_end",           // End
+              "location_end",       // Final location
+              "coord_end",
+              "duration_ival",      // Total time
+              "duration_next",      // Following off-time
+              "mileage",            // Mileage
+              "absolute_mileage_end" // Final mileage
+          ];
 
-        // Перебираем таблицы, ищем ту, что соответствует выбранному шаблону
-        for (var i = 0; i < data.length; i++) {
-            if (data[i].n === selectedTmpl) {
-                var col = data[i].col;
-                // Перебираем колонки внутри таблицы
-                for (var j = 0; j < col.length; j++) {
-                    // col[j].l — “человекочитаемая” метка, col[j].n — внутреннее имя колонки
-                    if (col[j].l !== '' && col[j].n !== '') {
-                        // проверяем, находится ли col[j].n в нашем списке defaultCheckedCols
-                        let checked = defaultCheckedCols.includes(col[j].n) ? "checked" : "";
-                        html += '<li><input class="rep_col" type="checkbox" id="' + col[j].n + '" ' + checked + '/>' +
-                                '<label for="' + col[j].n + '">' + col[j].l + '</label></li>';
-                    }
-                }
-            }
-        }
-        $('#columns').html(html);
-    });
-}
+          for (var i = 0; i < data.length; i++) {
+              if (data[i].n === selectedTmpl) {
+                  var col = data[i].col;
+                  for (var j = 0; j < col.length; j++) {
+                      if (col[j].l !== '' && col[j].n !== '') {
+                          let checked = defaultCheckedCols.includes(col[j].n) ? "checked" : "";
+                          html += '<li><input class="rep_col" type="checkbox" id="' + col[j].n + '" ' + checked + '/>' +
+                                  '<label for="' + col[j].n + '">' + col[j].l + '</label></li>';
+                      }
+                  }
+              }
+          }
+          $('#columns').html(html);
+      });
+  }
 
-// Пример функции отрисовки карты — сейчас она фактически не нужна, т.к. карта строится в Streamlit
-function drawMap() {
-    if (!window.preselectedUnits || window.preselectedUnits.length === 0) {
-        msg("No unit provided from Streamlit for map drawing.");
-        return;
-    }
-    var unit_id = window.preselectedUnits[0];
-    msg("Map drawn for unit: " + (window.unitNameMap[unit_id] || unit_id));
-}
+  function drawMap() {
+      if (!window.preselectedUnits || window.preselectedUnits.length === 0) {
+          msg("No unit provided from Streamlit for map drawing.");
+          return;
+      }
+      var unit_id = window.preselectedUnits[0];
+      msg("Map drawn for unit: " + (window.unitNameMap[unit_id] || unit_id));
+  }
 
-// Запуск отчётов Wialon для выбранных из Streamlit юнитов
-function executeReports() {
-    var id_res = $("#res").val(),
-        templ = $("#templ").val(),
-        selectedUnits = window.preselectedUnits,
-        time = $("#interval").val();
+  function executeReports() {
+      var id_res = $("#res").val(),
+          templ = $("#templ").val(),
+          selectedUnits = window.preselectedUnits,
+          time = $("#interval").val();
 
-    if (!id_res || !selectedUnits || selectedUnits.length === 0) {
-        msg("Select resource and at least one unit for reports");
-        return;
-    }
+      if (!id_res || !selectedUnits || selectedUnits.length === 0) {
+          msg("Select resource and at least one unit for reports");
+          return;
+      }
 
-    var sess = wialon.core.Session.getInstance();
-    var res = sess.getItem(id_res);
-    var to = sess.getServerTime();
-    var from = to - parseInt(time, 10);
+      var sess = wialon.core.Session.getInstance();
+      var res = sess.getItem(id_res);
+      var to = sess.getServerTime();
+      var from = to - parseInt(time, 10);
 
-    // Собираем выбранные чекбоксы
-    var columns = $("ul li .rep_col:checked");
-    var c = "", cl = "";
-    for (var i = 0; i < columns.length; i++) {
-        c += (c === "" ? "" : ",") + columns[i].id;
-        cl += (cl === "" ? "" : ",") + $(columns[i].nextSibling).text();
-    }
+      var columns = $("ul li .rep_col:checked");
+      var c = "", cl = "";
+      for (var i = 0; i < columns.length; i++) {
+          c += (c === "" ? "" : ",") + columns[i].id;
+          cl += (cl === "" ? "" : ",") + $(columns[i].nextSibling).text();
+      }
 
-    // Формируем временный шаблон отчёта
-    var template = {
-        "id": 0,
-        "n": templ,
-        "ct": "avl_unit",
-        "p": "",
-        "tbl": [{
-            "n": templ,
-            "l": $("#templ option[value='" + templ + "']").text(),
-            "c": c,
-            "cl": cl,
-            "s": "",
-            "sl": "",
-            "p": "",
-            "sch": {"f1":0, "f2":0, "t1":0, "t2":0, "m":0, "y":0, "w":0},
-            "f": 0
-        }]
-    };
+      var template = {
+          "id": 0,
+          "n": templ,
+          "ct": "avl_unit",
+          "p": "",
+          "tbl": [{
+              "n": templ,
+              "l": $("#templ option[value='" + templ + "']").text(),
+              "c": c,
+              "cl": cl,
+              "s": "",
+              "sl": "",
+              "p": "",
+              "sch": {"f1":0, "f2":0, "t1":0, "t2":0, "m":0, "y":0, "w":0},
+              "f": 0
+          }]
+      };
 
-    // Функция, которая запускает отчёт для одного юнита, ждёт окончания,
-    // вызывает cleanupResult, а потом вызывает себя для следующего юнита.
-    var index = 0;
-    $("#exec_btn").prop("disabled", true); // отключаем кнопку на время
+      var index = 0;
+      $("#exec_btn").prop("disabled", true);
 
-    function runReportsSequentially() {
-        if (index >= selectedUnits.length) {
-            // Все юниты обработаны
-            $("#exec_btn").prop("disabled", false);
-            msg("All reports are done.");
-            return;
-        }
+      function runReportsSequentially() {
+          if (index >= selectedUnits.length) {
+              $("#exec_btn").prop("disabled", false);
+              msg("All reports are done.");
+              return;
+          }
 
-        let unit_id = selectedUnits[index];
-        index++;
+          let unit_id = selectedUnits[index];
+          index++;
 
-        msg("<b>Starting report for Unit " + (window.unitNameMap[unit_id] || unit_id) + "...</b>");
+          msg("<b>Starting report for Unit " + (window.unitNameMap[unit_id] || unit_id) + "...</b>");
 
-        // Запускаем отчёт
-        res.execReport(template, unit_id, 0, { from: from, to: to, flags: wialon.item.MReport.intervalFlag.absolute },
-            function(code, data) {
-                if (code) {
-                    msg("Unit " + (window.unitNameMap[unit_id] || unit_id) + ": " + wialon.core.Errors.getErrorText(code));
-                    // Даже если ошибка, переходим к следующему
-                    cleanupAndNext();
-                    return;
-                }
-                if (!data.getTables().length) {
-                    msg("<b>Unit " + (window.unitNameMap[unit_id] || unit_id) + ": No data generated</b>");
-                    cleanupAndNext();
-                    return;
-                }
-                msg("<b>Report for Unit " + (window.unitNameMap[unit_id] || unit_id) + ":</b>");
-                // Показываем результат
-                showReportResult(data, function() {
-                    cleanupAndNext();
-                });
-            }
-        );
-    }
+          res.execReport(template, unit_id, 0, { from: from, to: to, flags: wialon.item.MReport.intervalFlag.absolute },
+              function(code, data) {
+                  if (code) {
+                      msg("Unit " + (window.unitNameMap[unit_id] || unit_id) + ": " + wialon.core.Errors.getErrorText(code));
+                      cleanupAndNext();
+                      return;
+                  }
+                  if (!data.getTables().length) {
+                      msg("<b>Unit " + (window.unitNameMap[unit_id] || unit_id) + ": No data generated</b>");
+                      cleanupAndNext();
+                      return;
+                  }
+                  msg("<b>Report for Unit " + (window.unitNameMap[unit_id] || unit_id) + ":</b>");
+                  showReportResult(data, function() {
+                      cleanupAndNext();
+                  });
+              }
+          );
+      }
 
-    // Отдельная функция, которая после чтения данных вызывает cleanupResult,
-    // а затем запускает следующий отчёт.
-    function cleanupAndNext() {
-        res.cleanupResult(function() {
-            // Идём к следующему юниту
-            runReportsSequentially();
-        });
-    }
+      function cleanupAndNext() {
+          res.cleanupResult(function() {
+              runReportsSequentially();
+          });
+      }
 
-    // ВАЖНО: модифицируем showReportResult, чтобы она асинхронно вызывала callback
-    // после того, как все getTableRows() считаны. Или же можно вызывать callback
-    // сразу, если не хотим ждать окончание отрисовки.
-    function showReportResult(result, cb) {
-        var tables = result.getTables();
-        if (!tables || !tables.length) {
-            // Если нет таблиц – сразу вызываем callback
-            if (typeof cb === "function") cb();
-            return;
-        }
-        let tableCounter = tables.length; // сколько таблиц осталось обработать
-        for (var i = 0; i < tables.length; i++) {
-            var html = "<b>" + tables[i].label + "</b><div class='wrap'><table style='width:100%'>";
-            var headers = tables[i].header;
-            html += "<tr>";
-            for (var j = 0; j < headers.length; j++) {
-                html += "<th>" + headers[j] + "</th>";
-            }
-            html += "</tr>";
+      function showReportResult(result, cb) {
+          var tables = result.getTables();
+          if (!tables || !tables.length) {
+              if (typeof cb === "function") cb();
+              return;
+          }
+          let tableCounter = tables.length;
+          for (var i = 0; i < tables.length; i++) {
+              var html = "<b>" + tables[i].label + "</b><div class='wrap'><table style='width:100%'>";
+              var headers = tables[i].header;
+              html += "<tr>";
+              for (var j = 0; j < headers.length; j++)
+                  html += "<th>" + headers[j] + "</th>";
+              html += "</tr>";
 
-            // Загружаем строки
-            result.getTableRows(i, 0, tables[i].rows, function(code, rows) {
-                if (code) { 
-                    msg(wialon.core.Errors.getErrorText(code)); 
-                } else {
-                    for (var r in rows) {
-                        if (!rows[r].c) continue;
-                        html += "<tr" + (r % 2 == 1 ? " class='odd'" : "") + ">";
-                        for (var k = 0; k < rows[r].c.length; k++) {
-                            html += "<td>" + getTableValue(rows[r].c[k]) + "</td>";
-                        }
-                        html += "</tr>";
-                    }
-                    html += "</table></div>";
-                    msg(html);
-                }
-                tableCounter--;
-                if (tableCounter === 0 && typeof cb === "function") {
-                    // Когда все таблицы обработаны
-                    cb();
-                }
-            });
-        }
-    }
+              result.getTableRows(i, 0, tables[i].rows, function(code, rows) {
+                  if (code) { msg(wialon.core.Errors.getErrorText(code)); }
+                  else {
+                      for (var r in rows) {
+                          if (!rows[r].c) continue;
+                          html += "<tr" + (r % 2 == 1 ? " class='odd'" : "") + ">";
+                          for (var k = 0; k < rows[r].c.length; k++)
+                              // Применяем adjustTime через getTableValue, чтобы время сдвигалось на +5 часов
+                              html += "<td>" + getTableValue(rows[r].c[k]) + "</td>";
+                          html += "</tr>";
+                      }
+                      html += "</table></div>";
+                      msg(html);
+                  }
+                  tableCounter--;
+                  if (tableCounter === 0 && typeof cb === "function") {
+                      cb();
+                  }
+              });
+          }
+      }
 
-    function getTableValue(data) {
-        if (typeof data == "object")
-            return data.t || "";
-        return data;
-    }
+      function getTableValue(data) {
+          var val = "";
+          if (typeof data == "object")
+              val = data.t || "";
+          else
+              val = data;
+          // Если значение выглядит как дата в формате "YYYY-MM-DD HH:mm:ss", применяем adjustTime:
+          if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(val)) {
+              return adjustTime(val);
+          }
+          return val;
+      }
 
-    // Запускаем цепочку
-    runReportsSequentially();
-}
+      runReportsSequentially();
+  }
 
-// Вывод результата отчёта
-function showReportResult(result) {
-    var tables = result.getTables();
-    if (!tables) return;
+  // Вывод результата отчёта (альтернативная реализация, если нужно отдельно)
+  function showReportResult(result) {
+      var tables = result.getTables();
+      if (!tables) return;
+      for (var i = 0; i < tables.length; i++) {
+          var html = "<b>" + tables[i].label + "</b><div class='wrap'><table style='width:100%'>";
+          var headers = tables[i].header;
+          html += "<tr>";
+          for (var j = 0; j < headers.length; j++) {
+              html += "<th>" + headers[j] + "</th>";
+          }
+          html += "</tr>";
+          result.getTableRows(i, 0, tables[i].rows, function(code, rows) {
+              if (code) { msg(wialon.core.Errors.getErrorText(code)); return; }
+              for (var j in rows) {
+                  if (!rows[j].c) continue;
+                  html += "<tr" + (j % 2 == 1 ? " class='odd'" : "") + ">";
+                  for (var k = 0; k < rows[j].c.length; k++) {
+                      html += "<td>" + getTableValue(rows[j].c[k]) + "</td>";
+                  }
+                  html += "</tr>";
+              }
+              html += "</table></div>";
+              msg(html);
+          });
+      }
+  }
 
-    for (var i = 0; i < tables.length; i++) {
-        var html = "<b>" + tables[i].label + "</b><div class='wrap'><table style='width:100%'>";
-        var headers = tables[i].header;
-        html += "<tr>";
-        for (var j = 0; j < headers.length; j++) {
-            html += "<th>" + headers[j] + "</th>";
-        }
-        html += "</tr>";
-
-        result.getTableRows(i, 0, tables[i].rows, function(code, rows) {
-            if (code) { msg(wialon.core.Errors.getErrorText(code)); return; }
-            for (var j in rows) {
-                if (!rows[j].c) continue;
-                html += "<tr" + (j % 2 == 1 ? " class='odd'" : "") + ">";
-                for (var k = 0; k < rows[j].c.length; k++) {
-                    html += "<td>" + getTableValue(rows[j].c[k]) + "</td>";
-                }
-                html += "</tr>";
-            }
-            html += "</table></div>";
-            msg(html);
-        });
-    }
-}
-
-// Получить корректное значение ячейки отчёта
-function getTableValue(data) {
-    if (typeof data == "object")
-        return data.t || "";
-    return data;
-}
-
-$(document).ready(function() {
-    $("#exec_btn").click(function() {
-        // При нажатии на кнопку:
-        // 1) Рисуем карту (если нужно, сейчас это лишь пример)
-        drawMap();
-        // 2) Запускаем отчёты
-        executeReports();
-    });
-
-    // Инициализируем Wialon Session
-    wialon.core.Session.getInstance().initSession("https://hst-api.wialon.host");
-    wialon.core.Session.getInstance().loginToken(
-        "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393",
-        "",
-        function(code) {
-            if (code) {
-                msg(wialon.core.Errors.getErrorText(code));
-                return;
-            }
-            msg("Logged successfully");
-            init();
-        }
-    );
-});
+  $(document).ready(function() {
+      $("#exec_btn").click(function() {
+          drawMap();
+          executeReports();
+      });
+      wialon.core.Session.getInstance().initSession("https://hst-api.wialon.host");
+      wialon.core.Session.getInstance().loginToken(
+          "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393",
+          "",
+          function(code) {
+              if (code) { msg(wialon.core.Errors.getErrorText(code)); return; }
+              msg("Logged successfully");
+              init();
+          }
+      );
+  });
 </script>
 </body>
 </html>
