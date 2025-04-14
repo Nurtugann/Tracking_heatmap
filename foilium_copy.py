@@ -251,17 +251,14 @@ if st.button("🚀 Запустить отчёты и карту"):
                     parsed_rows.append(line)
 
                 df = pd.DataFrame(parsed_rows, columns=headers)
-                # Если в таблице отдельно заданы колонки "Grouping", "Начало" и "Конец":
-                df.rename(columns={"Grouping": "День"}, inplace=True)
-                df["Начало"] = (
-                    pd.to_datetime(df["День"].astype(str) + " " + df["Начало"].astype(str), format="%Y-%m-%d %H:%M:%S")
-                    + pd.Timedelta(hours=5)
-                ).dt.strftime("%H:%M:%S")
-                df["Конец"] = (
-                    pd.to_datetime(df["День"].astype(str) + " " + df["Конец"].astype(str), format="%Y-%m-%d %H:%M:%S")
-                    + pd.Timedelta(hours=5)
-                ).dt.strftime("%H:%M:%S")
-
+                # Если в таблице отдельно заданы колонки "день" и "время", можно объединить их:
+                df["Начало"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Начало"].astype(str),
+                                                    format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
+                df["Конец"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Конец"].astype(str),
+                                                    format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
+                df.drop('Grouping', axis=1, inplace=True)
+                st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
+                st.dataframe(df, use_container_width=True)
         else:
             st.warning("❌ Ошибка в отчёте")
             st.json(report_result)
