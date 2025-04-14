@@ -191,7 +191,7 @@ if st.button("🚀 Запустить отчёты и карту"):
     # Встраиваем index.html (Wialon-репорт через JS) – там уже реализована обработка времени с +5 через adjustTime
     unit_ids = [unit_dict[name] for name in selected_units]
     units_json = json.dumps(unit_ids)
-    with open("index.html", "r", encoding="utf-8") as f:
+    with open("index_copy.html", "r", encoding="utf-8") as f:
         html = f.read()
     injected_js = f"""
     <script>
