@@ -52,6 +52,20 @@
 <div id="log"></div>
 
 <script type="text/javascript">
+  // Объект переводов для меток столбцов
+  var translations = {
+      "Beginning": "Начало",
+      "Initial location": "Начальное местоположение",
+      "Initial coordinates": "Начальные координаты",
+      "End": "Конец",
+      "Final location": "Конечное местоположение",
+      "Final coordinates": "Конечные координаты",
+      "Total time": "Общее время",
+      "Following off-time": "Время простоя",
+      "Mileage": "Пробег",
+      "Final mileage": "Окончательный пробег"
+  };
+
   // Функция для преобразования строки даты-времени и прибавления 5 часов
   function adjustTime(timeStr) {
       // Ожидается формат "YYYY-MM-DD HH:MM:SS"
@@ -76,7 +90,7 @@
           val = data.t || "";
       else
           val = data;
-      // Если значение соответствует формату "YYYY-MM-DD HH:MM:SS", применяем сдвиг
+      // Если значение соответствует формату "YYYY-MM-DD HH:mm:SS", применяем сдвиг
       if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(val)) {
           return adjustTime(val);
       }
@@ -151,9 +165,11 @@
                   var col = data[i].col;
                   for (var j = 0; j < col.length; j++) {
                       if (col[j].l !== '' && col[j].n !== '') {
+                          // Если для метки существует перевод, используем его
+                          var label = translations[col[j].l] ? translations[col[j].l] : col[j].l;
                           let checked = defaultCheckedCols.includes(col[j].n) ? "checked" : "";
                           html += '<li><input class="rep_col" type="checkbox" id="' + col[j].n + '" ' + checked + '/>' +
-                                  '<label for="' + col[j].n + '">' + col[j].l + '</label></li>';
+                                  '<label for="' + col[j].n + '">' + label + '</label></li>';
                       }
                   }
               }
@@ -275,7 +291,6 @@
                           if (!rows[r].c) continue;
                           html += "<tr" + (r % 2 == 1 ? " class='odd'" : "") + ">";
                           for (var k = 0; k < rows[r].c.length; k++)
-                              // Применяем adjustTime через getTableValue, чтобы время сдвигалось на +5 часов
                               html += "<td>" + getTableValue(rows[r].c[k]) + "</td>";
                           html += "</tr>";
                       }
@@ -296,7 +311,6 @@
               val = data.t || "";
           else
               val = data;
-          // Если значение выглядит как дата в формате "YYYY-MM-DD HH:mm:ss", применяем adjustTime:
           if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(val)) {
               return adjustTime(val);
           }
@@ -306,7 +320,6 @@
       runReportsSequentially();
   }
 
-  // Вывод результата отчёта (альтернативная реализация, если нужно отдельно)
   function showReportResult(result) {
       var tables = result.getTables();
       if (!tables) return;
