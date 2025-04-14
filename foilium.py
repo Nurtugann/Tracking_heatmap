@@ -105,7 +105,7 @@ def get_track(sid, unit_id):
                     dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
                     dt = datetime.datetime.fromtimestamp(t)
-                t_local = (dt + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+                t_local = (dt).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 t_local = t
             points.append({
@@ -251,12 +251,17 @@ if st.button("🚀 Запустить отчёты и карту"):
                     parsed_rows.append(line)
 
                 df = pd.DataFrame(parsed_rows, columns=headers)
-                # Если в таблице отдельно заданы колонки "день" и "время", можно объединить их:
-                if "день" in df.columns and "время" in df.columns:
-                    df["время_local"] = pd.to_datetime(df["день"].astype(str) + " " + df["время"].astype(str),
-                                                       format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
-                st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
-                st.dataframe(df, use_container_width=True)
+                # Если в таблице отдельно заданы колонки "Grouping", "Начало" и "Конец":
+                df.rename(columns={"Grouping": "День"}, inplace=True)
+                df["Начало"] = (
+                    pd.to_datetime(df["День"].astype(str) + " " + df["Начало"].astype(str), format="%Y-%m-%d %H:%M:%S")
+                    + pd.Timedelta(hours=5)
+                ).dt.strftime("%H:%M:%S")
+                df["Конец"] = (
+                    pd.to_datetime(df["День"].astype(str) + " " + df["Конец"].astype(str), format="%Y-%m-%d %H:%M:%S")
+                    + pd.Timedelta(hours=5)
+                ).dt.strftime("%H:%M:%S")
+
         else:
             st.warning("❌ Ошибка в отчёте")
             st.json(report_result)
