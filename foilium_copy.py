@@ -185,7 +185,7 @@ def detect_region_crossings(points, regions_geojson_path):
                 crossings.append({
                     "from_region": prev,
                     "to_region": row["region"],
-                    "time": (row["datetime"] + datetime.timedelta(hours=4.99)).strftime("%Y-%m-%d %H:%M:%S"),
+                    "time": (row["datetime"]).strftime("%Y-%m-%d %H:%M:%S"),
                     "lat": row["lat"],
                     "lon": row["lon"]
                 })
@@ -193,7 +193,7 @@ def detect_region_crossings(points, regions_geojson_path):
     return crossings
 
 # Чтение GeoJSON для регионов и пунктов населения
-with open("OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson", "r", encoding="utf-8") as f:
+with open("OSMB-a32774aedc0ecac56aa317d87777b10377956f1a.geojson", "r", encoding="utf-8") as f:
     regions_geojson_str = json.dumps(json.load(f))
 with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="utf-8") as f:
     cities_geojson_str = json.dumps(json.load(f))
@@ -222,7 +222,7 @@ if st.button("🚀 Запустить отчёты и карту"):
         last = coords[-1] if coords else None
 
         # Таблица переходов – данные уже содержат +5 часов (из get_track)
-        crossings = detect_region_crossings(detailed_points, "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson")
+        crossings = detect_region_crossings(detailed_points, "OSMB-a32774aedc0ecac56aa317d87777b10377956f1a.geojson")
         if crossings:
             st.subheader("⛳ Переходы между регионами")
             st.dataframe(pd.DataFrame(crossings))

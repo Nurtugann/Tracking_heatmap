@@ -1,247 +1,380 @@
+import streamlit as st
 import requests
 import json
-import time
+import datetime
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import Point
+import re
 
-# URL базового запроса к Wialon API
+st.cache_data.clear()
+st.set_page_config(layout="wide")
+st.title("🚗 Карта трека + 📊 Отчёты + 🗺️ Переходы регионов (по нескольким юнитам)")
+
+# Константы
+TOKEN = "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393"
 BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 
-# Токен для входа в систему (из вашего примера)
-TOKEN = "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393"
-
-# Используем requests.Session для сохранения куки и параметров между запросами
-session = requests.Session()
-
-def login():
-    """
-    Выполняет вход по токену.
-    """
-    params = {
-        "svc": "core/login",
-        "params": json.dumps({"token": TOKEN})
-    }
-    resp = session.get(BASE_URL, params=params)
-    data = resp.json()
-    if "error" in data:
-        print("Ошибка входа:", data["error"])
-        return None
-    print("Вход выполнен успешно.")
-    return data.get("eid")  # Идентификатор сессии
-
-def search_items(item_type, flags):
-    """
-    Выполняет поиск элементов указанного типа.
-    Используется метод 'core/search_items', который возвращает список ресурсов или единиц.
-    
-    :param item_type: Тип элемента, например, "avl_resource" или "avl_unit"
-    :param flags: Флаги, определяющие набор данных (например, базовая информация и дополнительные поля)
-    :return: Список найденных элементов
-    """
-    search_spec = {
-        "spec": {
-            "itemsType": item_type,
-            "propName": "sys_name",
-            "propValueMask": "*",
-            "sortType": "sys_name"
-        },
-        "force": 1,
-        "flags": flags,
-        "from": 0,
-        "to": 0
-    }
-    params = {
-        "svc": "core/search_items",
-        "params": json.dumps(search_spec)
-    }
-    resp = session.get(BASE_URL, params=params)
-    data = resp.json()
-    if "error" in data:
-        print(f"Ошибка поиска {item_type}:", data["error"])
-        return []
-    return data.get("items", [])
-
-def get_report_templates(resource_id):
-    """
-    Получает список шаблонов отчётов для указанного ресурса.
-    Используется метод 'resource/get_reports'.
-    
-    :param resource_id: Идентификатор ресурса
-    :return: Список шаблонов отчётов (фильтруются по типу 'avl_unit')
-    """
-    params = {
-        "svc": "resource/get_reports",
-        "params": json.dumps({"id": resource_id})
-    }
-    resp = session.get(BASE_URL, params=params)
-    data = resp.json()
-    if "error" in data:
-        print("Ошибка получения шаблонов отчётов:", data["error"])
-        return []
-    # Фильтруем шаблоны по типу, оставляем только те, у которых ct == "avl_unit"
-    templates = [tpl for tpl in data.get("reports", []) if tpl.get("ct") == "avl_unit"]
-    return templates
-
-def exec_report(resource_id, template_id, unit_id, interval_from, interval_to):
-    """
-    Выполняет отчёт с указанными параметрами.
-    Используется метод 'resource/exec_report'. Параметры передаются аналогично вызову res.execReport(...) в JS.
-    
-    :param resource_id: Идентификатор ресурса
-    :param template_id: Идентификатор шаблона отчёта
-    :param unit_id: Идентификатор единицы (устройства)
-    :param interval_from: Начало интервала в UNIX-времени (секунды)
-    :param interval_to: Конец интервала в UNIX-времени (секунды)
-    :return: Результат выполнения отчёта (словарь)
-    """
-    exec_params = {
-        "itemId": resource_id,
-        "reportTemplateId": template_id,
-        "unitId": unit_id,
-        "flags": 0,  # Дополнительные флаги (по необходимости)
-        "interval": {
-            "from": interval_from,
-            "to": interval_to,
-            "flags": 0  # Флаг абсолютного интервала
+@st.cache_data
+def login(token):
+    r = requests.get(
+        BASE_URL,
+        params={
+            "svc": "token/login",
+            "params": json.dumps({"token": token})
         }
-    }
-    params = {
-        "svc": "resource/exec_report",
-        "params": json.dumps(exec_params)
-    }
-    resp = session.get(BASE_URL, params=params)
-    data = resp.json()
-    if "error" in data:
-        print("Ошибка выполнения отчёта:", data["error"])
-        return None
-    return data
+    )
+    return r.json().get("eid")
 
-def print_report_result(result):
-    """
-    Обрабатывает и выводит результаты отчёта в консоль.
-    Предполагается, что результат содержит список таблиц с ключами:
-    - label: название таблицы
-    - header: список заголовков
-    - rows: список строк, где каждая строка – словарь с ключом "c" (ячейки)
-    """
-    tables = result.get("tables", [])
-    if not tables:
-        print("Отчёт не вернул данных.")
-        return
+@st.cache_data
+def get_items(sid, item_type, flags):
+    r = requests.get(
+        BASE_URL,
+        params={
+            "svc": "core/search_items",
+            "params": json.dumps({
+                "spec": {
+                    "itemsType": item_type,
+                    "propName": "sys_name",
+                    "propValueMask": "*",
+                    "sortType": "sys_name"
+                },
+                "force": 1,
+                "flags": flags,
+                "from": 0,
+                "to": 0
+            }),
+            "sid": sid
+        }
+    )
+    return r.json().get("items", [])
 
-    for table in tables:
-        print("\n=== Таблица:", table.get("label", "") + " ===")
-        headers = table.get("header", [])
-        print("\t" + "\t".join(headers))
-        rows = table.get("rows", [])
-        for row in rows:
-            # Если данные строки отсутствуют, пропускаем
-            if "c" not in row:
-                continue
-            cells = []
-            for cell in row["c"]:
-                # Если ячейка – это словарь с ключом 't'
-                if isinstance(cell, dict) and "t" in cell:
-                    cells.append(str(cell["t"]))
+# Авторизация и получение списка юнитов/ресурсов
+SID = login(TOKEN)
+units = get_items(SID, "avl_unit", 1)
+resources = get_items(SID, "avl_resource", 8193)
+
+if not resources or not units:
+    st.error("Нет ресурсов или юнитов.")
+    st.stop()
+
+unit_dict = {u["nm"]: u["id"] for u in units}
+# По умолчанию не выбираем ни один юнит, пусть пользователь выберет вручную
+selected_units = st.multiselect("Выберите юниты:", list(unit_dict))
+if not selected_units:
+    st.warning("Пожалуйста, выберите хотя бы один юнит.")
+    st.stop()
+
+res = resources[0]
+tpl_id = list(res["rep"].values())[0]["id"]
+
+today = datetime.date.today()
+selected_date = st.date_input("Выберите день", today)
+date_from = date_to = selected_date
+
+from_ts = int(datetime.datetime.combine(date_from, datetime.time.min).timestamp())
+to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
+
+def get_track(sid, unit_id):
+    """
+    Получаем трек юнита через messages/load_interval.
+    Здесь прибавляем +5 часов к значению времени (UTC -> местное)
+    – это значение используется для вычисления переходов между регионами.
+    """
+    r = requests.get(BASE_URL, params={
+        "svc": "messages/load_interval",
+        "params": json.dumps({
+            "itemId": unit_id,
+            "timeFrom": from_ts,
+            "timeTo": to_ts,
+            "flags": 0x1,
+            "flagsMask": 0,
+            "loadCount": 0xffffffff
+        }),
+        "sid": sid
+    })
+    js = r.json()
+    points = []
+    for m in js.get("messages", []):
+        if m.get("pos"):
+            t = m.get("t")
+            try:
+                # Прибавляем +5 часов к времени из сообщений
+                if isinstance(t, str):
+                    dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
-                    cells.append(str(cell))
-            print("\t" + "\t".join(cells))
+                    dt = datetime.datetime.fromtimestamp(t)
+                # Здесь смещение можно скорректировать (сейчас +0, если время уже переведено)
+                t_local = (dt + datetime.timedelta(hours=0)).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                t_local = t
+            points.append({
+                "lat": m["pos"]["y"],
+                "lon": m["pos"]["x"],
+                "time": t_local,  # уже локальное время (UTC+5)
+                "spd": m.get("spd", 0)
+            })
+    return points
 
-def main():
-    # Выполняем вход
-    eid = login()
-    if not eid:
-        return
+def execute_report(sid, res_id, tpl_id, unit_id):
+    r = requests.get(BASE_URL, params={
+        "svc": "report/exec_report",
+        "params": json.dumps({
+            "reportResourceId": res_id,
+            "reportTemplateId": tpl_id,
+            "reportObjectId": unit_id,
+            "reportObjectSecId": 0,
+            "interval": {"from": from_ts, "to": to_ts, "flags": 0}
+        }),
+        "sid": sid
+    })
+    return r.json()
 
-    # Задаём флаги для запроса базовой информации.
-    # Обычно для "base" используется значение 1.
-    # Для получения информации об отчётах (для ресурсов) может потребоваться дополнительный флаг.
-    base_flag = 1
-    report_flag = 1 << 12  # Обычно используется для получения шаблонов отчётов (примерное значение)
-    res_flags = base_flag | report_flag
-    unit_flags = base_flag
-
-    # Получаем список ресурсов
-    print("Ищем ресурсы...")
-    resources = search_items("avl_resource", res_flags)
-    if not resources:
-        print("Ресурсы не найдены.")
-        return
-
-    print("Найдены следующие ресурсы:")
-    for res in resources:
-        # Обычно имя хранится в ключе "nm" (системное имя)
-        print(f"ID = {res['id']}, Name = {res.get('nm', '')}")
-
-    resource_id_input = input("Введите ID ресурса: ").strip()
-    try:
-        resource_id = int(resource_id_input)
-    except ValueError:
-        print("Некорректный ID ресурса")
-        return
-
-    # Получаем список единиц (устройств)
-    print("\nИщем единицы (устройства)...")
-    units = search_items("avl_unit", unit_flags)
-    if not units:
-        print("Единицы не найдены.")
-        return
-
-    print("Найдены следующие единицы:")
-    for unit in units:
-        print(f"ID = {unit['id']}, Name = {unit.get('nm', '')}")
-
-    unit_id_input = input("Введите ID единицы: ").strip()
-    try:
-        unit_id = int(unit_id_input)
-    except ValueError:
-        print("Некорректный ID единицы")
-        return
-
-    # Получаем шаблоны отчётов для выбранного ресурса
-    print("\nПолучаем шаблоны отчётов для ресурса...")
-    templates = get_report_templates(resource_id)
-    if not templates:
-        print("Шаблоны отчётов не найдены или недостаточно прав для их выполнения.")
-        return
-
-    print("Доступные шаблоны отчётов (отфильтрованные по типу 'avl_unit'):")
-    for tpl in templates:
-        print(f"ID = {tpl['id']}, Name = {tpl.get('n', '')}")
-
-    template_id_input = input("Введите ID шаблона отчёта: ").strip()
-    try:
-        template_id = int(template_id_input)
-    except ValueError:
-        print("Некорректный ID шаблона")
-        return
-
-    # Выбор временного интервала
-    print("\nВыберите временной интервал:")
-    print("1. За последний день (86400 секунд)")
-    print("2. За последнюю неделю (604800 секунд)")
-    print("3. За последний месяц (2592000 секунд)")
-    choice = input("Ваш выбор (1-3): ").strip()
-    if choice == "1":
-        interval_seconds = 86400
-    elif choice == "2":
-        interval_seconds = 604800
-    elif choice == "3":
-        interval_seconds = 2592000
+def get_result_rows(sid, table_index, row_count):
+    r = requests.get(BASE_URL, params={
+        "svc": "report/get_result_rows",
+        "params": json.dumps({
+            "tableIndex": table_index,
+            "indexFrom": 0,
+            "indexTo": row_count
+        }),
+        "sid": sid
+    })
+    data = r.json()
+    if isinstance(data, dict) and "rows" in data:
+        return data["rows"]
+    elif isinstance(data, list):
+        return data
     else:
-        print("Неверный выбор.")
-        return
+        return []
 
-    # Определяем интервал отчёта по текущему времени
-    to_time = int(time.time())
-    from_time = to_time - interval_seconds
+def detect_region_crossings(points, regions_geojson_path):
+    if not points:
+        return []
+    df = pd.DataFrame(points)
+    # Здесь "time" уже строковое значение с прибавлением +5 часов (из get_track)
+    try:
+        df["datetime"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        st.warning(f"Ошибка преобразования времени: {e}")
+        df["datetime"] = pd.to_datetime(df["time"], errors='coerce')
+    df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
+    
+    # Читаем GeoJSON и создаем GeoDataFrame с явным указанием CRS
+    with open(regions_geojson_path, "r", encoding="utf-8") as f:
+        regions_geojson = json.load(f)
+    regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
+    regions.crs = "EPSG:4326"
+    
+    # Создаем GeoDataFrame из точек с указанным CRS
+    gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+    
+    def get_region(point):
+        for _, reg in regions.iterrows():
+            if reg["geometry"].contains(point):
+                # Если поле "shapeName" отсутствует, попробуем "name"
+                return reg.get("shapeName") or reg.get("name")
+        return None
+    gdf["region"] = gdf["geometry"].apply(get_region)
+    crossings = []
+    prev = None
+    for _, row in gdf.iterrows():
+        if row["region"] != prev:
+            if prev is not None:
+                # Пример смещения +4.99 часов для корректного времени
+                crossings.append({
+                    "from_region": prev,
+                    "to_region": row["region"],
+                    "time": (row["datetime"]).strftime("%Y-%m-%d %H:%M:%S"),
+                    "lat": row["lat"],
+                    "lon": row["lon"]
+                })
+            prev = row["region"]
+    return crossings
 
-    # Выполняем отчёт
-    print("\nВыполняется отчёт...")
-    result = exec_report(resource_id, template_id, unit_id, from_time, to_time)
-    if result is None:
-        return
+# Чтение GeoJSON для регионов и пунктов населения
+with open("OSMB-a32774aedc0ecac56aa317d87777b10377956f1a.geojson", "r", encoding="utf-8") as f:
+    regions_geojson_str = json.dumps(json.load(f))
+with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="utf-8") as f:
+    cities_geojson_str = json.dumps(json.load(f))
 
-    # Вывод результатов отчёта в консоль
-    print_report_result(result)
+if st.button("🚀 Запустить отчёты и карту"):
+    # Встраиваем index.html (Wialon-репорт через JS) – там уже реализована обработка времени с +5 через adjustTime
+    unit_ids = [unit_dict[name] for name in selected_units]
+    units_json = json.dumps(unit_ids)
+    with open("index.html", "r", encoding="utf-8") as f:
+        html = f.read()
+    injected_js = f"""
+    <script>
+    window.preselectedUnits = {units_json};
+    </script>
+    """
+    st.markdown("🔽 Ниже откроется Wialon-репорт для выбора и запуска произвольных отчётов:")
+    st.components.v1.html(html + injected_js, height=800, scrolling=True)
 
-if __name__ == '__main__':
-    main()
+    for unit_name in selected_units:
+        st.markdown(f"## 🚘 Юнит: {unit_name}")
+        unit_id = unit_dict[unit_name]
+
+        report_result = execute_report(SID, res["id"], tpl_id, unit_id)
+        detailed_points = get_track(SID, unit_id)
+        coords = [[p["lat"], p["lon"]] for p in detailed_points]
+        last = coords[-1] if coords else None
+
+        # Таблица переходов – данные уже содержат +5 часов (из get_track)
+        crossings = detect_region_crossings(detailed_points, "OSMB-a32774aedc0ecac56aa317d87777b10377956f1a.geojson")
+        if crossings:
+            st.subheader("⛳ Переходы между регионами")
+            st.dataframe(pd.DataFrame(crossings))
+
+        # Обработка отчёта (для таблиц unit_trips и unit_trace)
+        if "reportResult" in report_result:
+            for table_index, table in enumerate(report_result["reportResult"]["tables"]):
+                if table["name"] not in ["unit_trips", "unit_trace"]:
+                    continue
+                row_count = table["rows"]
+                headers = table["header"]
+                data = get_result_rows(SID, table_index, row_count)
+                rows = data  # data уже список
+
+                parsed_rows = []
+                for row_obj in rows:
+                    line = []
+                    for cell in row_obj["c"]:
+                        # Для отчётов предполагаем, что время из отчёта приходит в UTC,
+                        # и здесь прибавляем +5 часов для получения местного времени.
+                        if isinstance(cell, dict) and "t" in cell:
+                            raw_val = cell["t"]
+                        else:
+                            raw_val = cell
+                        if isinstance(raw_val, str) and re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$', raw_val):
+                            try:
+                                dt = datetime.datetime.strptime(raw_val, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
+                                val = dt.strftime("%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                val = raw_val
+                        elif isinstance(raw_val, (int, float)):
+                            dt = datetime.datetime.fromtimestamp(raw_val) + datetime.timedelta(hours=5)
+                            val = dt.strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            val = raw_val
+                        line.append(val)
+                    parsed_rows.append(line)
+
+                df = pd.DataFrame(parsed_rows, columns=headers)
+                # Если в таблице отдельно заданы колонки "Grouping", "Начало" и "Конец", объединяем "Grouping" (день)
+                # с "Начало" и "Конец", чтобы получить время суток.
+                df["Начало"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Начало"].astype(str),
+                                              format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
+                df["Конец"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Конец"].astype(str),
+                                              format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
+                # Оставляем в столбцах только время суток (без даты)
+                df["Начало"] = df["Начало"].dt.strftime("%H:%M:%S")
+                df["Конец"] = df["Конец"].dt.strftime("%H:%M:%S")
+                # Переименовываем столбец "Grouping" в "День"
+                df.rename(columns={"Grouping": "День"}, inplace=True)
+                st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
+                st.dataframe(df, use_container_width=True)
+        else:
+            st.warning("❌ Ошибка в отчёте")
+            st.json(report_result)
+
+        # --- Карта с управляемыми слоями ---
+        car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
+        coords_json = json.dumps(coords)
+        last_point_json = json.dumps(last)
+        map_html = f"""
+        <div id="map_{unit_name}" style="height: 600px;"></div>
+        <script>
+            var map = L.map('map_{unit_name}').setView([48.0, 68.0], 6);
+            L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png').addTo(map);
+            var coords = {coords_json};
+            var last = {last_point_json};
+            if (coords.length > 0) {{
+                var track = L.polyline(coords, {{color: 'red'}}).addTo(map);
+                map.fitBounds(track.getBounds());
+                if (last) {{
+                    var carIcon = L.icon({{
+                        iconUrl: "{car_icon_url}",
+                        iconSize: [32, 32],
+                        iconAnchor: [16, 16]
+                    }});
+                    L.marker([last[0], last[1]], {{icon: carIcon}}).addTo(map)
+                        .bindPopup("🚗 Последняя точка");
+                }}
+            }}
+            // Добавляем обработчик события зума, чтобы скрывать/показывать подписи при низком зуме
+            map.on('zoomend', function() {{
+                var currentZoom = map.getZoom();
+                regionsLayer.eachLayer(function(layer) {{
+                    if (layer.getTooltip()) {{
+                        if (currentZoom < 8) {{
+                            layer.getTooltip().setOpacity(0);
+                        }} else {{
+                            layer.getTooltip().setOpacity(1);
+                        }}
+                    }}
+                }});
+            }});
+            // Слой границ регионов с подписью
+            var regionsLayer = L.geoJSON({regions_geojson_str}, {{
+                style: function(feature) {{
+                    return {{ color: 'black', weight: 1, fillOpacity: 0 }};
+                }},
+                onEachFeature: function(feature, layer) {{
+                    if (feature.properties) {{
+                        var regionName = feature.properties.shapeName || feature.properties.name;
+                        if (regionName) {{
+                            layer.bindTooltip(regionName, {{
+                                permanent: true,
+                                direction: 'center',
+                                className: 'region-label'
+                            }});
+                        }}
+                    }}
+                }}
+            }});
+            // Слой пунктов населения
+            var citiesLayer = L.geoJSON({cities_geojson_str}, {{
+                pointToLayer: function(feature, latlng) {{
+                    var marker = L.marker(latlng);
+                    if (feature.properties && feature.properties.name) {{
+                        marker.bindPopup(feature.properties.name);
+                    }}
+                    return marker;
+                }}
+            }});
+            var cityCluster = L.markerClusterGroup();
+            cityCluster.addLayer(citiesLayer);
+            var overlays = {{
+                "Границы регионов": regionsLayer,
+                "Пункты населения": cityCluster
+            }};
+            L.control.layers(null, overlays, {{collapsed: false}}).addTo(map);
+            regionsLayer.addTo(map);
+            cityCluster.addTo(map);
+        </script>
+        <style>
+            .region-label {{
+                background-color: rgba(255, 255, 255, 0.7);
+                border: none;
+                font-size: 12px;
+                padding: 2px;
+            }}
+            .city-label {{
+                background-color: rgba(255, 255, 255, 0.7);
+                border: none;
+                font-size: 10px;
+                padding: 2px;
+            }}
+        </style>
+        """
+        st.components.v1.html(f"""
+        <html>
+        <head>
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
+            <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+            <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
+        </head>
+        <body>{map_html}</body></html>
+        """, height=800)
