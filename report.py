@@ -59,9 +59,8 @@ if not resources or not units:
     st.stop()
 
 unit_dict = {u["nm"]: u["id"] for u in units}
-# По умолчанию не выбираем ни один юнит
+# По умолчанию не выбираем ни один юнит, пусть пользователь выберет вручную
 selected_units = st.multiselect("Выберите юниты:", list(unit_dict))
-
 if not selected_units:
     st.warning("Пожалуйста, выберите хотя бы один юнит.")
     st.stop()
@@ -100,18 +99,18 @@ def get_track(sid, unit_id):
         if m.get("pos"):
             t = m.get("t")
             try:
-                # Прибавляем +5 часов к времени из сообщений
                 if isinstance(t, str):
                     dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
                     dt = datetime.datetime.fromtimestamp(t)
-                t_local = (dt + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+                # Если нужно добавить смещение, измените timedelta здесь (сейчас +0, так как время уже локальное)
+                t_local = (dt + datetime.timedelta(hours=0)).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 t_local = t
             points.append({
                 "lat": m["pos"]["y"],
                 "lon": m["pos"]["x"],
-                "time": t_local,  # уже локальное время (UTC+5)
+                "time": t_local,
                 "spd": m.get("spd", 0)
             })
     return points
@@ -152,20 +151,27 @@ def detect_region_crossings(points, regions_geojson_path):
     if not points:
         return []
     df = pd.DataFrame(points)
-    # Здесь "time" уже строковое значение с прибавлением +5 часов (из get_track)
     try:
         df["datetime"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S")
     except Exception as e:
         st.warning(f"Ошибка преобразования времени: {e}")
         df["datetime"] = pd.to_datetime(df["time"], errors='coerce')
     df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
-    regions = gpd.read_file(regions_geojson_path)
-    gdf = gpd.GeoDataFrame(df, geometry="geometry", crs=regions.crs)
+    
+    # Читаем GeoJSON и создаем GeoDataFrame с явным указанием CRS
+    with open(regions_geojson_path, "r", encoding="utf-8") as f:
+        regions_geojson = json.load(f)
+    regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
+    regions.crs = "EPSG:4326"
+    
+    gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+    
     def get_region(point):
         for _, reg in regions.iterrows():
             if reg["geometry"].contains(point):
-                return reg["shapeName"]
+                return reg.get("shapeName") or reg.get("name")
         return None
+    
     gdf["region"] = gdf["geometry"].apply(get_region)
     crossings = []
     prev = None
@@ -175,20 +181,21 @@ def detect_region_crossings(points, regions_geojson_path):
                 crossings.append({
                     "from_region": prev,
                     "to_region": row["region"],
-                    "time": row["datetime"].strftime("%Y-%m-%d %H:%M:%S"),
+                    "time": (row["datetime"] + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S"),
                     "lat": row["lat"],
                     "lon": row["lon"]
                 })
             prev = row["region"]
     return crossings
 
-with open("geoBoundaries-KAZ-ADM2.geojson", "r", encoding="utf-8") as f:
+# Чтение GeoJSON для регионов и пунктов населения
+with open("OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson", "r", encoding="utf-8") as f:
     regions_geojson_str = json.dumps(json.load(f))
 with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="utf-8") as f:
     cities_geojson_str = json.dumps(json.load(f))
 
 if st.button("🚀 Запустить отчёты и карту"):
-    # Встраиваем index.html (Wialon-репорт через JS) – там уже реализована обработка времени с +5 через adjustTime
+    # Встраиваем index.html (Wialon-репорт через JS) – там реализована обработка времени с +5 через adjustTime
     unit_ids = [unit_dict[name] for name in selected_units]
     units_json = json.dumps(unit_ids)
     with open("index.html", "r", encoding="utf-8") as f:
@@ -210,8 +217,8 @@ if st.button("🚀 Запустить отчёты и карту"):
         coords = [[p["lat"], p["lon"]] for p in detailed_points]
         last = coords[-1] if coords else None
 
-        # Таблица переходов – данные уже содержат +5 часов (из get_track)
-        crossings = detect_region_crossings(detailed_points, "geoBoundaries-KAZ-ADM2.geojson")
+        # Таблица переходов – данные уже содержат локальное время
+        crossings = detect_region_crossings(detailed_points, "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson")
         if crossings:
             st.subheader("⛳ Переходы между регионами")
             st.dataframe(pd.DataFrame(crossings))
@@ -224,14 +231,10 @@ if st.button("🚀 Запустить отчёты и карту"):
                 row_count = table["rows"]
                 headers = table["header"]
                 data = get_result_rows(SID, table_index, row_count)
-                rows = data  # data уже список
-
                 parsed_rows = []
-                for row_obj in rows:
+                for row_obj in data:
                     line = []
                     for cell in row_obj["c"]:
-                        # Для отчётов предполагаем, что время из отчёта приходит в UTC,
-                        # и здесь прибавляем +5 часов для получения местного времени.
                         if isinstance(cell, dict) and "t" in cell:
                             raw_val = cell["t"]
                         else:
@@ -249,13 +252,18 @@ if st.button("🚀 Запустить отчёты и карту"):
                             val = raw_val
                         line.append(val)
                     parsed_rows.append(line)
-
                 df = pd.DataFrame(parsed_rows, columns=headers)
-                # Если в таблице отдельно заданы колонки "день" и "время", можно объединить их:
-                if "день" in df.columns and "время" in df.columns:
-                    df["время_local"] = pd.to_datetime(df["день"].astype(str) + " " + df["время"].astype(str),
-                                                       format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
-                st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
+                # Если присутствуют столбцы "Grouping", "Начало" и "Конец", объединяем их:
+                if set(["Grouping", "Начало", "Конец"]).issubset(df.columns):
+                    df["Начало"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Начало"].astype(str),
+                                                  format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
+                    df["Конец"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Конец"].astype(str),
+                                                  format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
+                    # Оставляем в столбцах только время суток (без даты)
+                    df["Начало"] = df["Начало"].dt.strftime("%H:%M:%S")
+                    df["Конец"] = df["Конец"].dt.strftime("%H:%M:%S")
+                    df.rename(columns={"Grouping": "День"}, inplace=True)
+                st.markdown(f"### 📋 Таблица отчёта для {unit_name}")
                 st.dataframe(df, use_container_width=True)
         else:
             st.warning("❌ Ошибка в отчёте")
@@ -285,20 +293,39 @@ if st.button("🚀 Запустить отчёты и карту"):
                         .bindPopup("🚗 Последняя точка");
                 }}
             }}
+            // Слой границ регионов с подписью, управление видимостью подписей при зуме
             var regionsLayer = L.geoJSON({regions_geojson_str}, {{
                 style: function(feature) {{
                     return {{ color: 'black', weight: 1, fillOpacity: 0 }};
                 }},
                 onEachFeature: function(feature, layer) {{
-                    if (feature.properties && feature.properties.shapeName) {{
-                        layer.bindTooltip(feature.properties.shapeName, {{
-                            permanent: true,
-                            direction: 'center',
-                            className: 'region-label'
-                        }});
+                    if (feature.properties) {{
+                        var regionName = feature.properties.shapeName || feature.properties.name;
+                        if (regionName) {{
+                            layer.bindTooltip(regionName, {{
+                                permanent: true,
+                                direction: 'center',
+                                className: 'region-label',
+                                offset: [0,0]
+                            }});
+                        }}
                     }}
                 }}
             }});
+            // Добавляем обработчик события зума, чтобы скрывать/показывать подписи при низком зуме
+            map.on('zoomend', function() {{
+                var currentZoom = map.getZoom();
+                regionsLayer.eachLayer(function(layer) {{
+                    if (layer.getTooltip()) {{
+                        if (currentZoom < 8) {{
+                            layer.getTooltip().setOpacity(0);
+                        }} else {{
+                            layer.getTooltip().setOpacity(1);
+                        }}
+                    }}
+                }});
+            }});
+            // Слой пунктов населения
             var citiesLayer = L.geoJSON({cities_geojson_str}, {{
                 pointToLayer: function(feature, latlng) {{
                     var marker = L.marker(latlng);

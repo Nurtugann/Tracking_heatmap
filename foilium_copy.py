@@ -303,6 +303,19 @@ if st.button("🚀 Запустить отчёты и карту"):
                         .bindPopup("🚗 Последняя точка");
                 }}
             }}
+            // Добавляем обработчик события зума, чтобы скрывать/показывать подписи при низком зуме
+            map.on('zoomend', function() {{
+                var currentZoom = map.getZoom();
+                regionsLayer.eachLayer(function(layer) {{
+                    if (layer.getTooltip()) {{
+                        if (currentZoom < 8) {{
+                            layer.getTooltip().setOpacity(0);
+                        }} else {{
+                            layer.getTooltip().setOpacity(1);
+                        }}
+                    }}
+                }});
+            }});
             // Слой границ регионов с подписью
             var regionsLayer = L.geoJSON({regions_geojson_str}, {{
                 style: function(feature) {{
