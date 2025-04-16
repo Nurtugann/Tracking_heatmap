@@ -208,7 +208,7 @@ def detect_region_crossings(points, regions_geojson_path):
     crossings_list = list(crossings.apply(lambda row: {
         "from_region": row["prev_region"],
         "to_region": row["region"],
-        "time": (row["datetime"] + datetime.timedelta(hours=4.99)).strftime("%Y-%m-%d %H:%M:%S")
+        "time": (row["datetime"] + datetime.timedelta(hours=4.99)).strftime("%Y-%m-%d %H:%M:%S"),
         "lat": row["lat"],
         "lon": row["lon"]
     }, axis=1))
