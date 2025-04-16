@@ -15,8 +15,6 @@ st.title("🚗 Карта трека + 📊 Отчёты + 🗺️ Перехо�
 # Константы
 TOKEN = "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393"
 BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
-REGIONS_GEOJSON = "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson"
-CITIES_GEOJSON = "hotosm_kaz_populated_places_points_geojson.geojson"
 
 @st.cache_data
 def login(token):
@@ -62,8 +60,8 @@ if not resources or not units:
     st.stop()
 
 unit_dict = {u["nm"]: u["id"] for u in units}
-# Пользователь выбирает юниты для отображения карты и отчетов (основной блок)
-selected_units = st.multiselect("Выберите юниты (для отчётов и карты):", list(unit_dict))
+# По умолчанию не выбираем ни один юнит, пусть пользователь выберет вручную
+selected_units = st.multiselect("Выберите юниты:", list(unit_dict))
 if not selected_units:
     st.warning("Пожалуйста, выберите хотя бы один юнит.")
     st.stop()
@@ -81,8 +79,8 @@ to_ts = int(datetime.datetime.combine(date_to, datetime.time.max).timestamp())
 def get_track(sid, unit_id):
     """
     Получаем трек юнита через messages/load_interval.
-    Здесь прибавляем +5 часов к значению времени (UTC -> местное).
-    Это значение используется для вычисления переходов между регионами.
+    Здесь прибавляем +5 часов к значению времени (UTC -> местное)
+    – это значение используется для вычисления переходов между регионами.
     """
     r = requests.get(BASE_URL, params={
         "svc": "messages/load_interval",
@@ -102,10 +100,12 @@ def get_track(sid, unit_id):
         if m.get("pos"):
             t = m.get("t")
             try:
+                # Прибавляем +5 часов к времени из сообщений
                 if isinstance(t, str):
                     dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
                     dt = datetime.datetime.fromtimestamp(t)
+                # Здесь смещение можно скорректировать (сейчас +0, если время уже переведено)
                 t_local = (dt + datetime.timedelta(hours=0)).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 t_local = t
@@ -152,12 +152,12 @@ def get_result_rows(sid, table_index, row_count):
 def detect_region_crossings(points, regions_geojson_path):
     """
     Оптимизированная функция определения переходов между регионами с использованием spatial join.
-    Если в GeoDataFrame отсутствует столбец "shapeName", он создаётся на основе "name".
-    При формировании итогового времени к нему прибавляется +4.99 часов.
+    Если в GeoDataFrame с регионами отсутствует столбец "shapeName", он создаётся на основе столбца "name".
     """
     if not points:
         return []
     
+    # Создаем DataFrame и преобразуем время в datetime
     df = pd.DataFrame(points)
     try:
         df["datetime"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S")
@@ -165,20 +165,24 @@ def detect_region_crossings(points, regions_geojson_path):
         st.warning(f"Ошибка преобразования времени: {e}")
         df["datetime"] = pd.to_datetime(df["time"], errors='coerce')
     
+    # Создаем геометрию для точек и формируем GeoDataFrame
     df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
     gdf_points = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
     
+    # Читаем GeoJSON с регионами
     with open(regions_geojson_path, "r", encoding="utf-8") as f:
         regions_geojson = json.load(f)
     gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
     gdf_regions.crs = "EPSG:4326"
     
+    # Если столбца "shapeName" нет, создаем его на основе "name" (если "name" имеется)
     if "shapeName" not in gdf_regions.columns:
         if "name" in gdf_regions.columns:
             gdf_regions["shapeName"] = gdf_regions["name"]
         else:
             gdf_regions["shapeName"] = ""
     
+    # Выполняем пространственное объединение (spatial join) для сопоставления точек с регионами.
     gdf_joined = gpd.sjoin(
         gdf_points,
         gdf_regions[['geometry', 'shapeName']],
@@ -186,108 +190,66 @@ def detect_region_crossings(points, regions_geojson_path):
         predicate='within'
     )
     
+    # Название региона берем из "shapeName"
     gdf_joined["region"] = gdf_joined["shapeName"]
+    
+    # Сортировка по времени для корректного определения переходов
     gdf_joined = gdf_joined.sort_values("datetime").reset_index(drop=True)
+    
+    # Определяем смену региона через сдвиг (shift)
     gdf_joined["prev_region"] = gdf_joined["region"].shift()
+    # Исключаем первую запись, где нет предыдущего региона
     crossings = gdf_joined[gdf_joined["region"] != gdf_joined["prev_region"]].iloc[1:]
+    
+    # Если переходов не найдено, возвращаем пустой список
     if crossings.empty:
         return []
     
+    # Формируем итоговый список переходов с информацией о времени и координатах
     crossings_list = list(crossings.apply(lambda row: {
         "from_region": row["prev_region"],
         "to_region": row["region"],
-        "time": (row["datetime"] + datetime.timedelta(hours=4.99)).strftime("%Y-%m-%d %H:%M:%S"),
-        "lat": row["lat"],
-        "lon": row["lon"]
+        "time": (row["datetime"] + datetime.timedelta(hours=4.99)).strftime("%Y-%m-%d %H:%M:%S")
     }, axis=1))
     
     return crossings_list
 
-# Функция для формирования компактного отчета по выезду из домашнего региона
-def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_path):
-    results = []
-    with open(regions_geojson_path, "r", encoding="utf-8") as f:
-        regions_geojson = json.load(f)
-    gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
-    gdf_regions.crs = "EPSG:4326"
-    if "shapeName" not in gdf_regions.columns:
-        if "name" in gdf_regions.columns:
-            gdf_regions["shapeName"] = gdf_regions["name"]
-        else:
-            gdf_regions["shapeName"] = ""
-    
-    for unit_name in units_to_process:
-        # Выводим сообщение о том, какой unit обрабатывается
-        st.info(f"Обработка юнита: {unit_name}...")
-        unit_id = unit_dict[unit_name]
-        track = get_track(SID, unit_id)
-        if not track:
-            results.append({
-                "unit": unit_name,
-                "home_region": None,
-                "departure_time": None,
-                "new_region": None,
-                "status": "Нет данных по треку"
-            })
-            continue
-        # Определяем домашний регион по первой точке
-        df_first = pd.DataFrame([track[0]])
-        df_first["geometry"] = df_first.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
-        gdf_first = gpd.GeoDataFrame(df_first, geometry="geometry", crs="EPSG:4326")
-        gdf_first_joined = gpd.sjoin(gdf_first, gdf_regions[['geometry', 'shapeName']], how="left", predicate="within")
-        home_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
-        
-        # Получаем все переходы для данного трека
-        crossings = detect_region_crossings(track, regions_geojson_path)
-        departure_event = None
-        if crossings:
-            for event in crossings:
-                if event["from_region"] == home_region:
-                    departure_event = event
-                    break
-        if departure_event:
-            results.append({
-                "unit": unit_name,
-                "home_region": home_region,
-                "departure_time": departure_event["time"],
-                "new_region": departure_event["to_region"],
-                "status": "Выехал"
-            })
-        else:
-            results.append({
-                "unit": unit_name,
-                "home_region": home_region,
-                "departure_time": None,
-                "new_region": None,
-                "status": "Еще не выехал"
-            })
-    return pd.DataFrame(results)
-
-# Чтение GeoJSON для регионов и пунктов населения (для карты и отчетов)
-with open(REGIONS_GEOJSON, "r", encoding="utf-8") as f:
+# Чтение GeoJSON для регионов и пунктов населения
+with open("OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson", "r", encoding="utf-8") as f:
     regions_geojson_str = json.dumps(json.load(f))
-with open(CITIES_GEOJSON, "r", encoding="utf-8") as f:
+with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="utf-8") as f:
     cities_geojson_str = json.dumps(json.load(f))
 
-# ------------- Блок для выбранных юнитов: отчеты, карта, и переходы -------------
-if st.button("🚀 Запустить отчёты и карту для выбранных юнитов"):
+if st.button("🚀 Запустить отчёты и карту"):
+    # Встраиваем index.html (Wialon-репорт через JS) – там уже реализована обработка времени с +5 через adjustTime
+    unit_ids = [unit_dict[name] for name in selected_units]
+    units_json = json.dumps(unit_ids)
+    with open("index.html", "r", encoding="utf-8") as f:
+        html = f.read()
+    injected_js = f"""
+    <script>
+    window.preselectedUnits = {units_json};
+    </script>
+    """
+    st.markdown("🔽 Ниже откроется Wialon-репорт для выбора и запуска произвольных отчётов:")
+    st.components.v1.html(html + injected_js, height=800, scrolling=True)
+
     for unit_name in selected_units:
         st.markdown(f"## 🚘 Юнит: {unit_name}")
         unit_id = unit_dict[unit_name]
+
         report_result = execute_report(SID, res["id"], tpl_id, unit_id)
         detailed_points = get_track(SID, unit_id)
         coords = [[p["lat"], p["lon"]] for p in detailed_points]
         last = coords[-1] if coords else None
-        
-        crossings = detect_region_crossings(detailed_points, REGIONS_GEOJSON)
+
+        # Таблица переходов – данные уже содержат +5 часов (из get_track)
+        crossings = detect_region_crossings(detailed_points, "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson")
         if crossings:
             st.subheader("⛳ Переходы между регионами")
-            df_crossings = pd.DataFrame(crossings)
-            df_crossings["unit"] = unit_name
-            st.dataframe(df_crossings)
-        else:
-            st.info("Нет переходов найдено.")
-        
+            st.dataframe(pd.DataFrame(crossings))
+
+        # Обработка отчёта (для таблиц unit_trips и unit_trace)
         if "reportResult" in report_result:
             for table_index, table in enumerate(report_result["reportResult"]["tables"]):
                 if table["name"] not in ["unit_trips", "unit_trace"]:
@@ -295,10 +257,14 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                 row_count = table["rows"]
                 headers = table["header"]
                 data = get_result_rows(SID, table_index, row_count)
+                rows = data  # data уже список
+
                 parsed_rows = []
-                for row_obj in data:
+                for row_obj in rows:
                     line = []
                     for cell in row_obj["c"]:
+                        # Для отчётов предполагаем, что время из отчёта приходит в UTC,
+                        # и здесь прибавляем +5 часов для получения местного времени.
                         if isinstance(cell, dict) and "t" in cell:
                             raw_val = cell["t"]
                         else:
@@ -316,21 +282,26 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                             val = raw_val
                         line.append(val)
                     parsed_rows.append(line)
+
                 df = pd.DataFrame(parsed_rows, columns=headers)
+                # Если в таблице отдельно заданы колонки "Grouping", "Начало" и "Конец", объединяем "Grouping" (день)
+                # с "Начало" и "Конец", чтобы получить время суток.
                 df["Начало"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Начало"].astype(str),
                                               format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
                 df["Конец"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Конец"].astype(str),
                                               format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
+                # Оставляем в столбцах только время суток (без даты)
                 df["Начало"] = df["Начало"].dt.strftime("%H:%M:%S")
                 df["Конец"] = df["Конец"].dt.strftime("%H:%M:%S")
+                # Переименовываем столбец "Grouping" в "День"
                 df.rename(columns={"Grouping": "День"}, inplace=True)
                 st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
                 st.dataframe(df, use_container_width=True)
         else:
             st.warning("❌ Ошибка в отчёте")
             st.json(report_result)
-        
-        # --- Карта ---
+
+        # --- Карта с управляемыми слоями ---
         car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
         coords_json = json.dumps(coords)
         last_point_json = json.dumps(last)
@@ -354,6 +325,8 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                         .bindPopup("🚗 Последняя точка");
                 }}
             }}
+
+            // Слой границ регионов с подписью
             var regionsLayer = L.geoJSON({regions_geojson_str}, {{
                 style: function(feature) {{
                     return {{ color: 'black', weight: 1, fillOpacity: 0 }};
@@ -371,6 +344,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                     }}
                 }}
             }});
+            // Слой пунктов населения
             var citiesLayer = L.geoJSON({cities_geojson_str}, {{
                 pointToLayer: function(feature, latlng) {{
                     var marker = L.marker(latlng);
@@ -415,80 +389,30 @@ if st.button("🚀 Запустить отчёты и карту для выбр
         <body>{map_html}</body></html>
         """, height=800)
 
-# ------------- Новый блок: Отчет по выезду из домашнего региона для всех юнитов -------------
-if st.button("Сформировать отчет по выезду из домашнего региона для всех юнитов (Excel)"):
-    departure_report = create_departure_report(unit_dict, list(unit_dict.keys()), SID, REGIONS_GEOJSON)
-    if not departure_report.empty:
-        st.subheader("Отчет по выезду из домашнего региона для всех юнитов")
-        st.dataframe(departure_report)
+
+# -----------------------
+# Новый блок: кнопка для выгрузки переходов для ВСЕХ юнитов (без карты)
+if st.button("Выгрузить переходы для всех юнитов (Excel)"):
+    all_crossings_all_units = []
+    for unit_name, unit_id in unit_dict.items():
+        st.info(f"Обработка юнита: {unit_name}...")
+        detailed_points = get_track(SID, unit_id)
+        crossings = detect_region_crossings(detailed_points, "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson")
+        if crossings:
+            df_crossings = pd.DataFrame(crossings)
+            df_crossings["unit"] = unit_name
+            all_crossings_all_units.append(df_crossings)
+    if all_crossings_all_units:
+        df_all_crossings = pd.concat(all_crossings_all_units, ignore_index=True)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            departure_report.to_excel(writer, sheet_name="Departure Report", index=False)
+            df_all_crossings.to_excel(writer, sheet_name="Region Crossings", index=False)
         excel_data = output.getvalue()
         st.download_button(
-            label="Скачать отчет (Excel) для всех юнитов",
+            label="Скачать Excel для всех юнитов",
             data=excel_data,
-            file_name="departure_report_all_units.xlsx",
+            file_name="all_units_region_crossings.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
-        st.warning("Для всех юнитов нет данных по выезду из домашнего региона.")
-
-def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_path):
-    results = []
-    with open(regions_geojson_path, "r", encoding="utf-8") as f:
-        regions_geojson = json.load(f)
-    gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
-    gdf_regions.crs = "EPSG:4326"
-    if "shapeName" not in gdf_regions.columns:
-        if "name" in gdf_regions.columns:
-            gdf_regions["shapeName"] = gdf_regions["name"]
-        else:
-            gdf_regions["shapeName"] = ""
-    
-    for unit_name in units_to_process:
-        # Вывод сообщения о том, какой unit сейчас обрабатывается
-        st.info(f"Обработка юнита: {unit_name}...")
-        unit_id = unit_dict[unit_name]
-        track = get_track(SID, unit_id)
-        if not track:
-            results.append({
-                "unit": unit_name,
-                "home_region": None,
-                "departure_time": None,
-                "new_region": None,
-                "status": "Нет данных по треку"
-            })
-            continue
-        # Определяем домашний регион по первой точке
-        df_first = pd.DataFrame([track[0]])
-        df_first["geometry"] = df_first.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
-        gdf_first = gpd.GeoDataFrame(df_first, geometry="geometry", crs="EPSG:4326")
-        gdf_first_joined = gpd.sjoin(gdf_first, gdf_regions[['geometry', 'shapeName']], how="left", predicate="within")
-        home_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
-        
-        # Получаем переходы для данного трека
-        crossings = detect_region_crossings(track, regions_geojson_path)
-        departure_event = None
-        if crossings:
-            for event in crossings:
-                if event["from_region"] == home_region:
-                    departure_event = event
-                    break
-        if departure_event:
-            results.append({
-                "unit": unit_name,
-                "home_region": home_region,
-                "departure_time": departure_event["time"],
-                "new_region": departure_event["to_region"],
-                "status": "Выехал"
-            })
-        else:
-            results.append({
-                "unit": unit_name,
-                "home_region": home_region,
-                "departure_time": None,
-                "new_region": None,
-                "status": "Еще не выехал"
-            })
-    return pd.DataFrame(results)
+        st.warning("Переходы не найдены ни для одного юнита.")
