@@ -6,6 +6,7 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Point
 import re
+import io
 
 st.cache_data.clear()
 st.set_page_config(layout="wide")
@@ -389,3 +390,31 @@ if st.button("🚀 Запустить отчёты и карту"):
         </head>
         <body>{map_html}</body></html>
         """, height=800)
+
+
+# -----------------------
+# Новый блок: кнопка для выгрузки переходов для ВСЕХ юнитов (без карты)
+if st.button("Выгрузить переходы для всех юнитов (Excel)"):
+    all_crossings_all_units = []
+    for unit_name, unit_id in unit_dict.items():
+        st.info(f"Обработка юнита: {unit_name}...")
+        detailed_points = get_track(SID, unit_id)
+        crossings = detect_region_crossings(detailed_points, "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson")
+        if crossings:
+            df_crossings = pd.DataFrame(crossings)
+            df_crossings["unit"] = unit_name
+            all_crossings_all_units.append(df_crossings)
+    if all_crossings_all_units:
+        df_all_crossings = pd.concat(all_crossings_all_units, ignore_index=True)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_all_crossings.to_excel(writer, sheet_name="Region Crossings", index=False)
+        excel_data = output.getvalue()
+        st.download_button(
+            label="Скачать Excel для всех юнитов",
+            data=excel_data,
+            file_name="all_units_region_crossings.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.warning("Переходы не найдены ни для одного юнита.")

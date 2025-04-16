@@ -60,9 +60,11 @@ if not resources or not units:
     st.stop()
 
 unit_dict = {u["nm"]: u["id"] for u in units}
-selected_units = st.multiselect("Выберите юниты:", list(unit_dict))
+
+# Если пользователь хочет работать только с выбранными юнитами (для остальных блоков)
+selected_units = st.multiselect("Выберите юниты (для отчётов и карты):", list(unit_dict))
 if not selected_units:
-    st.warning("Пожалуйста, выберите хотя бы один юнит.")
+    st.warning("Пожалуйста, выберите хотя бы один юнит для отображения отчётов и карты.")
     st.stop()
 
 res = resources[0]
@@ -99,7 +101,6 @@ def get_track(sid, unit_id):
         if m.get("pos"):
             t = m.get("t")
             try:
-                # Прибавляем +5 часов к времени из сообщений
                 if isinstance(t, str):
                     dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
@@ -152,11 +153,11 @@ def detect_region_crossings(points, regions_geojson_path):
     """
     Оптимизированная функция определения переходов между регионами с использованием spatial join.
     Если в GeoDataFrame с регионами отсутствует столбец "shapeName", он создаётся на основе столбца "name".
+    При формировании итогового времени к нему прибавляется +5 часов.
     """
     if not points:
         return []
     
-    # Создаем DataFrame и преобразуем время в datetime
     df = pd.DataFrame(points)
     try:
         df["datetime"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S")
@@ -164,24 +165,20 @@ def detect_region_crossings(points, regions_geojson_path):
         st.warning(f"Ошибка преобразования времени: {e}")
         df["datetime"] = pd.to_datetime(df["time"], errors='coerce')
     
-    # Создаем геометрию для точек и формируем GeoDataFrame
     df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
     gdf_points = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
     
-    # Читаем GeoJSON с регионами
     with open(regions_geojson_path, "r", encoding="utf-8") as f:
         regions_geojson = json.load(f)
     gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
     gdf_regions.crs = "EPSG:4326"
     
-    # Если столбца "shapeName" нет, создаем его на основе "name" (если "name" имеется)
     if "shapeName" not in gdf_regions.columns:
         if "name" in gdf_regions.columns:
             gdf_regions["shapeName"] = gdf_regions["name"]
         else:
             gdf_regions["shapeName"] = ""
     
-    # Выполняем пространственное объединение (spatial join) для сопоставления точек с регионами
     gdf_joined = gpd.sjoin(
         gdf_points,
         gdf_regions[['geometry', 'shapeName']],
@@ -189,30 +186,19 @@ def detect_region_crossings(points, regions_geojson_path):
         predicate='within'
     )
     
-    # Название региона берем из "shapeName"
     gdf_joined["region"] = gdf_joined["shapeName"]
-    
-    # Сортировка по времени для корректного определения переходов
     gdf_joined = gdf_joined.sort_values("datetime").reset_index(drop=True)
-    
-    # Определяем смену региона через сдвиг (shift)
     gdf_joined["prev_region"] = gdf_joined["region"].shift()
-    # Исключаем первую запись, где нет предыдущего региона
     crossings = gdf_joined[gdf_joined["region"] != gdf_joined["prev_region"]].iloc[1:]
-    
-    # Если переходов не найдено, возвращаем пустой список
     if crossings.empty:
         return []
     
-    # Формируем итоговый список переходов с информацией о времени и координатах
+    # При формировании времени перехода прибавляем +5 часов
     crossings_list = list(crossings.apply(lambda row: {
         "from_region": row["prev_region"],
         "to_region": row["region"],
-        "time": row["datetime"].strftime("%Y-%m-%d %H:%M:%S"),
-        "lat": row["lat"],
-        "lon": row["lon"]
+        "time": (row["datetime"] + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
     }, axis=1))
-    
     return crossings_list
 
 # Чтение GeoJSON для регионов и пунктов населения
@@ -221,30 +207,26 @@ with open("OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson", "r", encoding
 with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="utf-8") as f:
     cities_geojson_str = json.dumps(json.load(f))
 
-# Список для агрегации переходов по всем unit
-all_crossings_list = []
-
-if st.button("🚀 Запустить отчёты и карту"):
-    # Здесь ранее выводился index.html с Wialon-репортом – этот блок убран для ускорения работы.
+# -----------------------
+# Блок для отображения отчётов и карты для выбранных юнитов
+if st.button("🚀 Запустить отчёты и карту для выбранных юнитов"):
     for unit_name in selected_units:
         st.markdown(f"## 🚘 Юнит: {unit_name}")
         unit_id = unit_dict[unit_name]
-
         report_result = execute_report(SID, res["id"], tpl_id, unit_id)
         detailed_points = get_track(SID, unit_id)
         coords = [[p["lat"], p["lon"]] for p in detailed_points]
         last = coords[-1] if coords else None
-
-        # Вычисляем переходы между регионами с использованием оптимизированной функции
+        
         crossings = detect_region_crossings(detailed_points, "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson")
         if crossings:
             st.subheader("⛳ Переходы между регионами")
             df_crossings = pd.DataFrame(crossings)
-            # Добавляем информацию о unit
             df_crossings["unit"] = unit_name
             st.dataframe(df_crossings)
-            all_crossings_list.append(df_crossings)
-
+        else:
+            st.info("Нет переходов найдено.")
+        
         # Обработка отчёта (для таблиц unit_trips и unit_trace)
         if "reportResult" in report_result:
             for table_index, table in enumerate(report_result["reportResult"]["tables"]):
@@ -257,7 +239,6 @@ if st.button("🚀 Запустить отчёты и карту"):
                 for row_obj in data:
                     line = []
                     for cell in row_obj["c"]:
-                        # В отчётах время приходит в UTC, прибавляем +5 часов для получения местного времени.
                         if isinstance(cell, dict) and "t" in cell:
                             raw_val = cell["t"]
                         else:
@@ -275,9 +256,7 @@ if st.button("🚀 Запустить отчёты и карту"):
                             val = raw_val
                         line.append(val)
                     parsed_rows.append(line)
-
                 df = pd.DataFrame(parsed_rows, columns=headers)
-                # Если заданы колонки "Grouping", "Начало" и "Конец", объединяем их для получения времени суток
                 df["Начало"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Начало"].astype(str),
                                               format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
                 df["Конец"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Конец"].astype(str),
@@ -290,7 +269,7 @@ if st.button("🚀 Запустить отчёты и карту"):
         else:
             st.warning("❌ Ошибка в отчёте")
             st.json(report_result)
-
+    
         # --- Карта с управляемыми слоями ---
         car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
         coords_json = json.dumps(coords)
@@ -315,7 +294,6 @@ if st.button("🚀 Запустить отчёты и карту"):
                         .bindPopup("🚗 Последняя точка");
                 }}
             }}
-            // Слой границ регионов с подписью
             var regionsLayer = L.geoJSON({regions_geojson_str}, {{
                 style: function(feature) {{
                     return {{ color: 'black', weight: 1, fillOpacity: 0 }};
@@ -333,7 +311,6 @@ if st.button("🚀 Запустить отчёты и карту"):
                     }}
                 }}
             }});
-            // Слой пунктов населения
             var citiesLayer = L.geoJSON({cities_geojson_str}, {{
                 pointToLayer: function(feature, latlng) {{
                     var marker = L.marker(latlng);
@@ -377,18 +354,30 @@ if st.button("🚀 Запустить отчёты и карту"):
         </head>
         <body>{map_html}</body></html>
         """, height=800)
-    
-    # Если есть данные по переходам для хотя бы одного unit, агрегируем их в один DataFrame
-    if all_crossings_list:
-        df_all_crossings = pd.concat(all_crossings_list, ignore_index=True)
-        # Создаем Excel-файл в памяти
+
+# -----------------------
+# Новый блок: кнопка для выгрузки переходов для ВСЕХ юнитов (без карты)
+if st.button("Выгрузить переходы для всех юнитов (Excel)"):
+    all_crossings_all_units = []
+    for unit_name, unit_id in unit_dict.items():
+        st.info(f"Обработка юнита: {unit_name}...")
+        detailed_points = get_track(SID, unit_id)
+        crossings = detect_region_crossings(detailed_points, "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson")
+        if crossings:
+            df_crossings = pd.DataFrame(crossings)
+            df_crossings["unit"] = unit_name
+            all_crossings_all_units.append(df_crossings)
+    if all_crossings_all_units:
+        df_all_crossings = pd.concat(all_crossings_all_units, ignore_index=True)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             df_all_crossings.to_excel(writer, sheet_name="Region Crossings", index=False)
         excel_data = output.getvalue()
         st.download_button(
-            label="Выгрузить все переходы между регионами (Excel)",
+            label="Скачать Excel для всех юнитов",
             data=excel_data,
-            file_name="all_region_crossings.xlsx",
+            file_name="all_units_region_crossings.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+    else:
+        st.warning("Переходы не найдены ни для одного юнита.")
