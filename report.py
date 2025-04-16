@@ -6,6 +6,7 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Point
 import re
+import io
 
 st.cache_data.clear()
 st.set_page_config(layout="wide")
@@ -180,7 +181,7 @@ def detect_region_crossings(points, regions_geojson_path):
         else:
             gdf_regions["shapeName"] = ""
     
-    # Выполняем пространственное объединение (spatial join) для сопоставления точек с регионами.
+    # Выполняем пространственное объединение (spatial join) для сопоставления точек с регионами
     gdf_joined = gpd.sjoin(
         gdf_points,
         gdf_regions[['geometry', 'shapeName']],
@@ -214,29 +215,17 @@ def detect_region_crossings(points, regions_geojson_path):
     
     return crossings_list
 
-
 # Чтение GeoJSON для регионов и пунктов населения
 with open("OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson", "r", encoding="utf-8") as f:
     regions_geojson_str = json.dumps(json.load(f))
 with open("hotosm_kaz_populated_places_points_geojson.geojson", "r", encoding="utf-8") as f:
     cities_geojson_str = json.dumps(json.load(f))
 
-if st.button("🚀 Запустить отчёты и карту"):
-    # Здесь ранее выводился index.html с Wialon-репортом (встроенный HTML),
-    # но мы его убираем для ускорения работы.
-    #
-    # unit_ids = [unit_dict[name] for name in selected_units]
-    # units_json = json.dumps(unit_ids)
-    # with open("index.html", "r", encoding="utf-8") as f:
-    #     html = f.read()
-    # injected_js = f"""
-    # <script>
-    # window.preselectedUnits = {units_json};
-    # </script>
-    # """
-    # st.markdown("🔽 Ниже откроется Wialon-репорт для выбора и запуска произвольных отчётов:")
-    # st.components.v1.html(html + injected_js, height=800, scrolling=True)
+# Список для агрегации переходов по всем unit
+all_crossings_list = []
 
+if st.button("🚀 Запустить отчёты и карту"):
+    # Здесь ранее выводился index.html с Wialon-репортом – этот блок убран для ускорения работы.
     for unit_name in selected_units:
         st.markdown(f"## 🚘 Юнит: {unit_name}")
         unit_id = unit_dict[unit_name]
@@ -250,7 +239,11 @@ if st.button("🚀 Запустить отчёты и карту"):
         crossings = detect_region_crossings(detailed_points, "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson")
         if crossings:
             st.subheader("⛳ Переходы между регионами")
-            st.dataframe(pd.DataFrame(crossings))
+            df_crossings = pd.DataFrame(crossings)
+            # Добавляем информацию о unit
+            df_crossings["unit"] = unit_name
+            st.dataframe(df_crossings)
+            all_crossings_list.append(df_crossings)
 
         # Обработка отчёта (для таблиц unit_trips и unit_trace)
         if "reportResult" in report_result:
@@ -284,8 +277,7 @@ if st.button("🚀 Запустить отчёты и карту"):
                     parsed_rows.append(line)
 
                 df = pd.DataFrame(parsed_rows, columns=headers)
-                # Если заданы колонки "Grouping", "Начало" и "Конец", объединяем "Grouping" (день)
-                # с "Начало" и "Конец", чтобы получить время суток
+                # Если заданы колонки "Grouping", "Начало" и "Конец", объединяем их для получения времени суток
                 df["Начало"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Начало"].astype(str),
                                               format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
                 df["Конец"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Конец"].astype(str),
@@ -385,3 +377,18 @@ if st.button("🚀 Запустить отчёты и карту"):
         </head>
         <body>{map_html}</body></html>
         """, height=800)
+    
+    # Если есть данные по переходам для хотя бы одного unit, агрегируем их в один DataFrame
+    if all_crossings_list:
+        df_all_crossings = pd.concat(all_crossings_list, ignore_index=True)
+        # Создаем Excel-файл в памяти
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_all_crossings.to_excel(writer, sheet_name="Region Crossings", index=False)
+        excel_data = output.getvalue()
+        st.download_button(
+            label="Выгрузить все переходы между регионами (Excel)",
+            data=excel_data,
+            file_name="all_region_crossings.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )

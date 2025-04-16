@@ -149,48 +149,71 @@ def get_result_rows(sid, table_index, row_count):
         return []
 
 def detect_region_crossings(points, regions_geojson_path):
+    """
+    Оптимизированная функция определения переходов между регионами с использованием spatial join.
+    Если в GeoDataFrame с регионами отсутствует столбец "shapeName", он создаётся на основе столбца "name".
+    """
     if not points:
         return []
+    
+    # Создаем DataFrame и преобразуем время в datetime
     df = pd.DataFrame(points)
-    # Здесь "time" уже строковое значение с прибавлением +5 часов (из get_track)
     try:
         df["datetime"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S")
     except Exception as e:
         st.warning(f"Ошибка преобразования времени: {e}")
         df["datetime"] = pd.to_datetime(df["time"], errors='coerce')
-    df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
     
-    # Читаем GeoJSON и создаем GeoDataFrame с явным указанием CRS
+    # Создаем геометрию для точек и формируем GeoDataFrame
+    df["geometry"] = df.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
+    gdf_points = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+    
+    # Читаем GeoJSON с регионами
     with open(regions_geojson_path, "r", encoding="utf-8") as f:
         regions_geojson = json.load(f)
-    regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
-    regions.crs = "EPSG:4326"
+    gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
+    gdf_regions.crs = "EPSG:4326"
     
-    # Создаем GeoDataFrame из точек с указанным CRS
-    gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+    # Если столбца "shapeName" нет, создаем его на основе "name" (если "name" имеется)
+    if "shapeName" not in gdf_regions.columns:
+        if "name" in gdf_regions.columns:
+            gdf_regions["shapeName"] = gdf_regions["name"]
+        else:
+            gdf_regions["shapeName"] = ""
     
-    def get_region(point):
-        for _, reg in regions.iterrows():
-            if reg["geometry"].contains(point):
-                # Если поле "shapeName" отсутствует, попробуем "name"
-                return reg.get("shapeName") or reg.get("name")
-        return None
-    gdf["region"] = gdf["geometry"].apply(get_region)
-    crossings = []
-    prev = None
-    for _, row in gdf.iterrows():
-        if row["region"] != prev:
-            if prev is not None:
-                # Пример смещения +4.99 часов для корректного времени
-                crossings.append({
-                    "from_region": prev,
-                    "to_region": row["region"],
-                    "time": (row["datetime"]).strftime("%Y-%m-%d %H:%M:%S"),
-                    "lat": row["lat"],
-                    "lon": row["lon"]
-                })
-            prev = row["region"]
-    return crossings
+    # Выполняем пространственное объединение (spatial join) для сопоставления точек с регионами.
+    gdf_joined = gpd.sjoin(
+        gdf_points,
+        gdf_regions[['geometry', 'shapeName']],
+        how="left",
+        predicate='within'
+    )
+    
+    # Название региона берем из "shapeName"
+    gdf_joined["region"] = gdf_joined["shapeName"]
+    
+    # Сортировка по времени для корректного определения переходов
+    gdf_joined = gdf_joined.sort_values("datetime").reset_index(drop=True)
+    
+    # Определяем смену региона через сдвиг (shift)
+    gdf_joined["prev_region"] = gdf_joined["region"].shift()
+    # Исключаем первую запись, где нет предыдущего региона
+    crossings = gdf_joined[gdf_joined["region"] != gdf_joined["prev_region"]].iloc[1:]
+    
+    # Если переходов не найдено, возвращаем пустой список
+    if crossings.empty:
+        return []
+    
+    # Формируем итоговый список переходов с информацией о времени и координатах
+    crossings_list = list(crossings.apply(lambda row: {
+        "from_region": row["prev_region"],
+        "to_region": row["region"],
+        "time": row["datetime"].strftime("%Y-%m-%d %H:%M:%S"),
+        "lat": row["lat"],
+        "lon": row["lon"]
+    }, axis=1))
+    
+    return crossings_list
 
 # Чтение GeoJSON для регионов и пунктов населения
 with open("OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson", "r", encoding="utf-8") as f:
@@ -303,6 +326,7 @@ if st.button("🚀 Запустить отчёты и карту"):
                         .bindPopup("🚗 Последняя точка");
                 }}
             }}
+
             // Слой границ регионов с подписью
             var regionsLayer = L.geoJSON({regions_geojson_str}, {{
                 style: function(feature) {{
