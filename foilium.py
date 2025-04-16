@@ -56,7 +56,6 @@ def get_items(sid, item_type, flags):
 SID = login(TOKEN)
 units = get_items(SID, "avl_unit", 1)
 resources = get_items(SID, "avl_resource", 8193)
-
 if not resources or not units:
     st.error("Нет ресурсов или юнитов.")
     st.stop()
@@ -203,7 +202,6 @@ def detect_region_crossings(points, regions_geojson_path):
     
     return crossings_list
 
-# Функция для формирования компактного отчета по выезду из домашнего региона
 def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_path):
     results = []
     with open(regions_geojson_path, "r", encoding="utf-8") as f:
@@ -217,7 +215,6 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             gdf_regions["shapeName"] = ""
     
     for unit_name in units_to_process:
-        # Выводим сообщение о том, какой unit обрабатывается
         st.info(f"Обработка юнита: {unit_name}...")
         unit_id = unit_dict[unit_name]
         track = get_track(SID, unit_id)
@@ -237,7 +234,7 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         gdf_first_joined = gpd.sjoin(gdf_first, gdf_regions[['geometry', 'shapeName']], how="left", predicate="within")
         home_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
         
-        # Получаем все переходы для данного трека
+        # Получаем переходы для данного трека
         crossings = detect_region_crossings(track, regions_geojson_path)
         departure_event = None
         if crossings:
@@ -413,26 +410,28 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
         </head>
         <body>{map_html}</body></html>
-        """, height=800)
+        """, height=600)
 
 # ------------- Новый блок: Отчет по выезду из домашнего региона для всех юнитов -------------
 if st.button("Сформировать отчет по выезду из домашнего региона для всех юнитов (Excel)"):
     departure_report = create_departure_report(unit_dict, list(unit_dict.keys()), SID, REGIONS_GEOJSON)
-    if not departure_report.empty:
-        st.subheader("Отчет по выезду из домашнего региона для всех юнитов")
-        st.dataframe(departure_report)
+    # Фильтруем отчет, чтобы показать только юниты, у которых статус "Еще не выехал"
+    not_departed_report = departure_report[departure_report["status"]=="Еще не выехал"]
+    if not not_departed_report.empty:
+        st.subheader("Отчет по выезду из домашнего региона для всех юнитов (только те, кто еще не выехал)")
+        st.dataframe(not_departed_report)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            departure_report.to_excel(writer, sheet_name="Departure Report", index=False)
+            not_departed_report.to_excel(writer, sheet_name="Not Departed", index=False)
         excel_data = output.getvalue()
         st.download_button(
-            label="Скачать отчет (Excel) для всех юнитов",
+            label="Скачать отчет (Excel) для юнитов, еще не выехавших",
             data=excel_data,
-            file_name="departure_report_all_units.xlsx",
+            file_name="departure_report_not_departed.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
-        st.warning("Для всех юнитов нет данных по выезду из домашнего региона.")
+        st.warning("Все юниты уже выехали из своего домашнего региона, либо нет данных.")
 
 def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_path):
     results = []
@@ -447,7 +446,6 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             gdf_regions["shapeName"] = ""
     
     for unit_name in units_to_process:
-        # Вывод сообщения о том, какой unit сейчас обрабатывается
         st.info(f"Обработка юнита: {unit_name}...")
         unit_id = unit_dict[unit_name]
         track = get_track(SID, unit_id)
@@ -460,14 +458,12 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
                 "status": "Нет данных по треку"
             })
             continue
-        # Определяем домашний регион по первой точке
         df_first = pd.DataFrame([track[0]])
         df_first["geometry"] = df_first.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
         gdf_first = gpd.GeoDataFrame(df_first, geometry="geometry", crs="EPSG:4326")
         gdf_first_joined = gpd.sjoin(gdf_first, gdf_regions[['geometry', 'shapeName']], how="left", predicate="within")
         home_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
         
-        # Получаем переходы для данного трека
         crossings = detect_region_crossings(track, regions_geojson_path)
         departure_event = None
         if crossings:
