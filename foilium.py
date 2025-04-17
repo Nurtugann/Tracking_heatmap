@@ -202,6 +202,7 @@ def detect_region_crossings(points, regions_geojson_path):
     
     return crossings_list
 
+
 def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_path):
     results = []
     with open(regions_geojson_path, "r", encoding="utf-8") as f:
@@ -209,13 +210,13 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
     gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
     gdf_regions.crs = "EPSG:4326"
     if "shapeName" not in gdf_regions.columns:
-        if "name" in gdf_regions.columns:
-            gdf_regions["shapeName"] = gdf_regions["name"]
-        else:
-            gdf_regions["shapeName"] = ""
-    
-    for unit_name in units_to_process:
-        st.info(f"Обработка юнита: {unit_name}...")
+        gdf_regions["shapeName"] = gdf_regions.get("name", "")
+
+    progress_text = "🔄 Обработка юнитов..."
+    my_bar = st.progress(0, text=progress_text)
+
+    total_units = len(units_to_process)
+    for i, unit_name in enumerate(units_to_process, start=1):
         unit_id = unit_dict[unit_name]
         track = get_track(SID, unit_id)
         if not track:
@@ -224,40 +225,64 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
                 "home_region": None,
                 "departure_time": None,
                 "new_region": None,
-                "status": "Нет данных по треку"
+                "status": "Нет данных по треку",
+                "returned_home": None,
+                "return_time": None
             })
+            my_bar.progress(i / total_units, text=f"{unit_name} — нет данных")
             continue
-        # Определяем домашний регион по первой точке
+
         df_first = pd.DataFrame([track[0]])
         df_first["geometry"] = df_first.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
         gdf_first = gpd.GeoDataFrame(df_first, geometry="geometry", crs="EPSG:4326")
         gdf_first_joined = gpd.sjoin(gdf_first, gdf_regions[['geometry', 'shapeName']], how="left", predicate="within")
         home_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
-        
-        # Получаем переходы для данного трека
+
         crossings = detect_region_crossings(track, regions_geojson_path)
         departure_event = None
+        returned_home = None
+        return_time = None
+
         if crossings:
-            for event in crossings:
-                if event["from_region"] == home_region:
+            for idx, event in enumerate(crossings):
+                if event["from_region"] == home_region and not departure_event:
                     departure_event = event
                     break
-        if departure_event:
-            results.append({
-                "unit": unit_name,
-                "home_region": home_region,
-                "departure_time": departure_event["time"],
-                "new_region": departure_event["to_region"],
-                "status": "Выехал"
-            })
-        else:
-            results.append({
-                "unit": unit_name,
-                "home_region": home_region,
-                "departure_time": None,
-                "new_region": None,
-                "status": "Еще не выехал"
-            })
+
+            if departure_event:
+                after_departure = crossings[idx + 1:]
+                return_indices = [
+                    j for j, e in enumerate(after_departure)
+                    if e["to_region"] == home_region
+                ]
+
+                if return_indices:
+                    last_return_idx = return_indices[-1]
+                    return_event = after_departure[last_return_idx]
+
+                    after_return = after_departure[last_return_idx + 1:]
+                    left_again = any(
+                        e["from_region"] == home_region for e in after_return
+                    )
+
+                    if not left_again:
+                        returned_home = True
+                        return_time = return_event["time"]
+
+        results.append({
+            "unit": unit_name,
+            "home_region": home_region,
+            "departure_time": departure_event["time"] if departure_event else None,
+            "new_region": departure_event["to_region"] if departure_event else None,
+            "status": "Выехал" if departure_event else "Еще не выехал",
+            "returned_home": returned_home if departure_event else None,
+            "return_time": return_time if returned_home else None
+        })
+
+        my_bar.progress(i / total_units, text=f"{unit_name} ✅")
+
+    my_bar.empty()
+
     return pd.DataFrame(results)
 
 # Чтение GeoJSON для регионов и пунктов населения (для карты и отчетов)
@@ -413,7 +438,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
         <body>{map_html}</body></html>
         """, height=600)
 
-if st.button("📤 Сформировать отчёт по выезду из домашнего региона (Excel + таблицы)"):
+if st.button("📤 Сформировать отчёт по выезду из домашнего региона (Для всех) (Excel + таблицы)"):
     with st.spinner("Генерация отчёта..."):
         report_df = create_departure_report(unit_dict, list(unit_dict.keys()), SID, REGIONS_GEOJSON)
         
@@ -423,13 +448,13 @@ if st.button("📤 Сформировать отчёт по выезду из д
 
         if not not_departed_df.empty:
             st.subheader("🚫 Ещё не выехали из домашнего региона:")
-            st.dataframe(not_departed_df, use_container_width=True)
+            st.dataframe(not_departed_df.reset_index(drop=False), use_container_width=True)
         else:
             st.info("✅ Все юниты выехали из своих домашних регионов.")
 
         if not departed_df.empty:
             st.subheader("✅ Уже выехали из домашнего региона:")
-            st.dataframe(departed_df, use_container_width=True)
+            st.dataframe(departed_df.reset_index(drop=False), use_container_width=True)
         else:
             st.info("🚫 Никто не выехал из домашнего региона.")
 
@@ -454,11 +479,8 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
     gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
     gdf_regions.crs = "EPSG:4326"
     if "shapeName" not in gdf_regions.columns:
-        if "name" in gdf_regions.columns:
-            gdf_regions["shapeName"] = gdf_regions["name"]
-        else:
-            gdf_regions["shapeName"] = ""
-    
+        gdf_regions["shapeName"] = gdf_regions.get("name", "")
+
     for unit_name in units_to_process:
         st.info(f"Обработка юнита: {unit_name}...")
         unit_id = unit_dict[unit_name]
@@ -469,36 +491,38 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
                 "home_region": None,
                 "departure_time": None,
                 "new_region": None,
-                "status": "Нет данных по треку"
+                "status": "Нет данных по треку",
+                "returned_home": None,
+                "return_time": None
             })
             continue
+
         df_first = pd.DataFrame([track[0]])
         df_first["geometry"] = df_first.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
         gdf_first = gpd.GeoDataFrame(df_first, geometry="geometry", crs="EPSG:4326")
         gdf_first_joined = gpd.sjoin(gdf_first, gdf_regions[['geometry', 'shapeName']], how="left", predicate="within")
         home_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
-        
+
         crossings = detect_region_crossings(track, regions_geojson_path)
         departure_event = None
+        return_event = None
+
         if crossings:
-            for event in crossings:
-                if event["from_region"] == home_region:
+            for idx, event in enumerate(crossings):
+                if event["from_region"] == home_region and not departure_event:
                     departure_event = event
-                    break
-        if departure_event:
-            results.append({
-                "unit": unit_name,
-                "home_region": home_region,
-                "departure_time": departure_event["time"],
-                "new_region": departure_event["to_region"],
-                "status": "Выехал"
-            })
-        else:
-            results.append({
-                "unit": unit_name,
-                "home_region": home_region,
-                "departure_time": None,
-                "new_region": None,
-                "status": "Еще не выехал"
-            })
+                elif departure_event and event["to_region"] == home_region:
+                    return_event = event
+                    break  # первый возврат после выезда
+
+        results.append({
+            "unit": unit_name,
+            "home_region": home_region,
+            "departure_time": departure_event["time"] if departure_event else None,
+            "new_region": departure_event["to_region"] if departure_event else None,
+            "status": "Выехал" if departure_event else "Еще не выехал",
+            "returned_home": bool(return_event) if departure_event else None,
+            "return_time": return_event["time"] if return_event else None
+        })
+
     return pd.DataFrame(results)
