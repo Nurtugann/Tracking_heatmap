@@ -368,6 +368,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                     }}
                 }}
             }});
+            
             var citiesLayer = L.geoJSON({cities_geojson_str}, {{
                 pointToLayer: function(feature, latlng) {{
                     var marker = L.marker(latlng);
@@ -412,26 +413,39 @@ if st.button("🚀 Запустить отчёты и карту для выбр
         <body>{map_html}</body></html>
         """, height=600)
 
-# ------------- Новый блок: Отчет по выезду из домашнего региона для всех юнитов -------------
-if st.button("Сформировать отчет по выезду из домашнего региона для всех юнитов (Excel)"):
-    departure_report = create_departure_report(unit_dict, list(unit_dict.keys()), SID, REGIONS_GEOJSON)
-    # Фильтруем отчет, чтобы показать только юниты, у которых статус "Еще не выехал"
-    not_departed_report = departure_report[departure_report["status"]=="Еще не выехал"]
-    if not not_departed_report.empty:
-        st.subheader("Отчет по выезду из домашнего региона для всех юнитов (только те, кто еще не выехал)")
-        st.dataframe(not_departed_report)
+if st.button("📤 Сформировать отчёт по выезду из домашнего региона (Excel + таблицы)"):
+    with st.spinner("Генерация отчёта..."):
+        report_df = create_departure_report(unit_dict, list(unit_dict.keys()), SID, REGIONS_GEOJSON)
+        
+        # Таблица 1: те, кто ещё не выехал
+        not_departed_df = report_df[report_df["status"] == "Еще не выехал"]
+        departed_df = report_df[report_df["status"] == "Выехал"]
+
+        if not not_departed_df.empty:
+            st.subheader("🚫 Ещё не выехали из домашнего региона:")
+            st.dataframe(not_departed_df, use_container_width=True)
+        else:
+            st.info("✅ Все юниты выехали из своих домашних регионов.")
+
+        if not departed_df.empty:
+            st.subheader("✅ Уже выехали из домашнего региона:")
+            st.dataframe(departed_df, use_container_width=True)
+        else:
+            st.info("🚫 Никто не выехал из домашнего региона.")
+
+        # Скачивание Excel с двумя таблицами
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            not_departed_report.to_excel(writer, sheet_name="Not Departed", index=False)
+            not_departed_df.to_excel(writer, sheet_name="Еще не выехал", index=False)
+            departed_df.to_excel(writer, sheet_name="Уже выехал", index=False)
         excel_data = output.getvalue()
+
         st.download_button(
-            label="Скачать отчет (Excel) для юнитов, еще не выехавших",
+            label="📥 Скачать Excel-отчет (2 листа)",
             data=excel_data,
-            file_name="departure_report_not_departed.xlsx",
+            file_name="departure_report_full.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    else:
-        st.warning("Все юниты уже выехали из своего домашнего региона, либо нет данных.")
 
 def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_path):
     results = []
