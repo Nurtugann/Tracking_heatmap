@@ -221,13 +221,12 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         track = get_track(SID, unit_id)
         if not track:
             results.append({
-                "unit": unit_name,
-                "home_region": None,
-                "departure_time": None,
-                "new_region": None,
-                "status": "Нет данных по треку",
-                "returned_home": None,
-                "return_time": None
+                "Юнит": unit_name,
+                "Домашний регион": None,
+                "Время выезда с региона": None,
+                "Статус": "Нет данных по треку",
+                "Вернулся в регион": None,
+                "Время возвращения": None
             })
             my_bar.progress(i / total_units, text=f"{unit_name} — нет данных")
             continue
@@ -270,13 +269,12 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
                         return_time = return_event["time"]
 
         results.append({
-            "unit": unit_name,
-            "home_region": home_region,
-            "departure_time": departure_event["time"] if departure_event else None,
-            "new_region": departure_event["to_region"] if departure_event else None,
-            "status": "Выехал" if departure_event else "Еще не выехал",
-            "returned_home": returned_home if departure_event else None,
-            "return_time": return_time if returned_home else None
+            "Юнит": unit_name,
+            "Домашний регион": home_region,
+            "Время выезда с региона": departure_event["time"] if departure_event else None,
+            "Статус": "Выехал" if departure_event else "Еще не выехал",
+            "Вернулся в регион": returned_home if departure_event else None,
+            "Время возвращения": return_time if returned_home else None
         })
 
         my_bar.progress(i / total_units, text=f"{unit_name} ✅")
@@ -443,18 +441,18 @@ if st.button("📤 Сформировать отчёт по выезду из д
         report_df = create_departure_report(unit_dict, list(unit_dict.keys()), SID, REGIONS_GEOJSON)
         
         # Таблица 1: те, кто ещё не выехал
-        not_departed_df = report_df[report_df["status"] == "Еще не выехал"]
-        departed_df = report_df[report_df["status"] == "Выехал"]
+        not_departed_df = report_df[report_df["Статус"] == "Еще не выехал"]
+        departed_df = report_df[report_df["Статус"] == "Выехал"]
 
         if not not_departed_df.empty:
             st.subheader("🚫 Ещё не выехали из домашнего региона:")
-            st.dataframe(not_departed_df.reset_index(drop=False), use_container_width=True)
+            st.dataframe(not_departed_df.reset_index(drop=True), use_container_width=True)
         else:
             st.info("✅ Все юниты выехали из своих домашних регионов.")
 
         if not departed_df.empty:
             st.subheader("✅ Уже выехали из домашнего региона:")
-            st.dataframe(departed_df.reset_index(drop=False), use_container_width=True)
+            st.dataframe(departed_df.reset_index(drop=True), use_container_width=True)
         else:
             st.info("🚫 Никто не выехал из домашнего региона.")
 
@@ -487,13 +485,12 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         track = get_track(SID, unit_id)
         if not track:
             results.append({
-                "unit": unit_name,
-                "home_region": None,
-                "departure_time": None,
-                "new_region": None,
-                "status": "Нет данных по треку",
-                "returned_home": None,
-                "return_time": None
+                "Юнит": unit_name,
+                "Домашний регион": None,
+                "Время выезда с региона": None,
+                "Статус": "Нет данных по треку",
+                "Вернулся в регион": None,
+                "Время возвращения": None
             })
             continue
 
@@ -516,13 +513,12 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
                     break  # первый возврат после выезда
 
         results.append({
-            "unit": unit_name,
-            "home_region": home_region,
-            "departure_time": departure_event["time"] if departure_event else None,
-            "new_region": departure_event["to_region"] if departure_event else None,
-            "status": "Выехал" if departure_event else "Еще не выехал",
-            "returned_home": bool(return_event) if departure_event else None,
-            "return_time": return_event["time"] if return_event else None
+            "Юнит": unit_name,
+            "Домашний регион": home_region,
+            "Время выезда с региона": departure_event["time"] if departure_event else None,
+            "Статус": "Выехал" if departure_event else "Еще не выехал",
+            "Вернулся в регион": bool(return_event) if departure_event else None,
+            "Время возвращения": return_event["time"] if return_event else None
         })
 
     return pd.DataFrame(results)
