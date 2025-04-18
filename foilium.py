@@ -280,7 +280,7 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
                 first_entry_times[region] = event["time"]
 
         # Преобразуем в читаемый формат
-        entry_times_str = '\n'.join(f"{r}: {t}" for r, t in first_entry_times.items())
+        entry_times_str = '\n'.join(f"{r}: {pd.to_datetime(t).strftime('%H:%M:%S')}" for r, t in first_entry_times.items())
 
 
         visited_resp = responsible & visited_regions
