@@ -272,6 +272,16 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         # 💡 Анализ ответственных регионов
         visited_regions = set(e["to_region"] for e in crossings if e["to_region"])
         responsible = set(responsible_regions.get(unit_name, [])) if responsible_regions else set()
+        # Словарь: регион → время первого входа
+        first_entry_times = {}
+        for event in crossings:
+            region = event["to_region"]
+            if region in responsible and region not in first_entry_times:
+                first_entry_times[region] = event["time"]
+
+        # Преобразуем в читаемый формат
+        entry_times_str = '; '.join(f"{r}: {t}" for r, t in first_entry_times.items())
+
         visited_resp = responsible & visited_regions
         not_visited_resp = responsible - visited_regions
 
@@ -301,6 +311,7 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             "Вернулся в регион": returned_home if departure_event else None,
             "Время возвращения в регион": return_time if returned_home else None,
             "Назначенные регионы": ', '.join(sorted(str(r) for r in responsible if pd.notna(r))),
+            "Первый заезд в назначенные регионы": entry_times_str,
             "Комментарий по регионам": region_comment
         })
 
