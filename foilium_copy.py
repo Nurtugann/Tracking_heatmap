@@ -300,7 +300,6 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         else:
             region_comment = f"✅ Посетил все регионы: {format_regions(visited_resp)}"
 
-        visited_regions_str = ', '.join(sorted(str(r) for r in visited_regions if pd.notna(r)))
 
         
         results.append({
@@ -310,7 +309,6 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             "Статус": "Выехал" if departure_event else "Еще не выехал",
             "Вернулся в регион": returned_home if departure_event else None,
             "Время возвращения в регион": return_time if returned_home else None,
-            "Назначенные регионы": ', '.join(sorted(str(r) for r in responsible if pd.notna(r))),
             "Первый заезд в назначенные регионы": entry_times_str,
             "Комментарий по регионам": region_comment
         })
