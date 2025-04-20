@@ -490,13 +490,13 @@ if st.button("📤 Сформировать отчёт по выезду из д
         departed_df = report_df[report_df["Статус"] == "Выехал"]
 
         if not not_departed_df.empty:
-            st.subheader("🚫 Ещё не выехали из домашнего региона:")
+            st.subheader("🚫 Не выехали из домашнего региона:")
             st.dataframe(not_departed_df.reset_index(drop=True), use_container_width=True)
         else:
             st.info("✅ Все юниты выехали из своих домашних регионов.")
 
         if not departed_df.empty:
-            st.subheader("✅ Уже выехали из домашнего региона:")
+            st.subheader("✅ Выехали из домашнего региона:")
             st.dataframe(departed_df.reset_index(drop=True), use_container_width=True)
         else:
             st.info("🚫 Никто не выехал из домашнего региона.")
