@@ -13,7 +13,7 @@ st.set_page_config(layout="wide")
 st.title("🚗 Карта трека + 📊 Отчёты + 🗺️ Переходы регионов (по нескольким юнитам)")
 
 # Константы
-TOKEN = "c611c2bab48335e36a4b59be460c57d2DC99601D0C49777B24DFE07B7614A2826A62C393"
+TOKEN = "c611c2bab48335e36a4b59be460c57d270AC971D82FE3E8089C4E317B0ABFB855D254860"
 BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 REGIONS_GEOJSON = "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson"
 CITIES_GEOJSON = "hotosm_kaz_populated_places_points_geojson.geojson"
