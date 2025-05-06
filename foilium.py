@@ -373,12 +373,44 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                         line.append(val)
                     parsed_rows.append(line)
                 df = pd.DataFrame(parsed_rows, columns=headers)
-                df["Начало"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Начало"].astype(str),
-                                              format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
-                df["Конец"] = pd.to_datetime(df["Grouping"].astype(str) + " " + df["Конец"].astype(str),
-                                              format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=5)
-                df["Начало"] = df["Начало"].dt.strftime("%H:%M:%S")
-                df["Конец"] = df["Конец"].dt.strftime("%H:%M:%S")
+
+                # Обрабатываем "Начало"
+                df["Начало"] = (
+                    df
+                    .apply(
+                        lambda row: (
+                            # пытаемся распарсить как полную метку YYYY-MM-DD HH:MM:SS
+                            pd.to_datetime(str(row["Начало"]), format="%Y-%m-%d %H:%M:%S", errors="raise")
+                        )
+                        if re.match(r"^\d{4}-\d{2}-\d{2}", str(row["Начало"]))
+                        else pd.to_datetime(
+                            f"{row['Grouping']} {row['Начало']}",
+                            format="%Y-%m-%d %H:%M:%S",
+                            errors="coerce"
+                        )
+                        , axis=1
+                    )
+                    + pd.Timedelta(hours=5)
+                ).dt.strftime("%H:%M:%S")
+
+                # Обрабатываем "Конец"
+                df["Конец"] = (
+                    df
+                    .apply(
+                        lambda row: (
+                            pd.to_datetime(str(row["Конец"]), format="%Y-%m-%d %H:%M:%S", errors="raise")
+                        )
+                        if re.match(r"^\d{4}-\d{2}-\d{2}", str(row["Конец"]))
+                        else pd.to_datetime(
+                            f"{row['Grouping']} {row['Конец']}",
+                            format="%Y-%m-%d %H:%M:%S",
+                            errors="coerce"
+                        )
+                        , axis=1
+                    )
+                    + pd.Timedelta(hours=5)
+                ).dt.strftime("%H:%M:%S")
+
                 df.rename(columns={"Grouping": "День"}, inplace=True)
                 st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
                 st.dataframe(df, use_container_width=True)
