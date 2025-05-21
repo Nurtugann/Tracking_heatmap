@@ -344,18 +344,6 @@ if st.button("🚀 Запустить отчёты и карту для выбр
         else:
             st.info("Нет переходов найдено.")
         
-        # Проверка на ошибку при выполнении отчёта
-        if "error" in report_result:
-            error_code = report_result.get("error")
-            reason = report_result.get("reason", "Неизвестная ошибка")
-
-            if error_code == 1003 and "exec_report_duration" in reason:
-                st.error(f"⚠️ Отчёт слишком тяжёлый и превысил лимит времени выполнения (ошибка 1003). "
-                        f"Попробуй сократить интервал или уменьшить детализацию шаблона.")
-            else:
-                st.error(f"❌ Ошибка при выполнении отчёта (код {error_code}): {reason}")
-            st.stop()
-
         if "reportResult" in report_result:
             for table_index, table in enumerate(report_result["reportResult"]["tables"]):
                 if table["name"] not in ["unit_trips", "unit_trace"]:
@@ -363,8 +351,6 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                 row_count = table["rows"]
                 headers = table["header"]
                 data = get_result_rows(SID, table_index, row_count)
-
-                # Обработка и отображение таблицы
                 parsed_rows = []
                 for row_obj in data:
                     line = []
@@ -386,14 +372,13 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                             val = raw_val
                         line.append(val)
                     parsed_rows.append(line)
-
                 df = pd.DataFrame(parsed_rows, columns=headers)
-
                 # Обрабатываем "Начало"
                 df["Начало"] = (
                     df
                     .apply(
                         lambda row: (
+                            # пытаемся распарсить как полную метку YYYY-MM-DD HH:MM:SS
                             pd.to_datetime(str(row["Начало"]), format="%Y-%m-%d %H:%M:%S", errors="raise")
                         )
                         if re.match(r"^\d{4}-\d{2}-\d{2}", str(row["Начало"]))
@@ -424,13 +409,12 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                     )
                     + pd.Timedelta(hours=5)
                 ).dt.strftime("%H:%M:%S")
-
                 df.rename(columns={"Grouping": "День"}, inplace=True)
                 st.markdown(f"### 📋 Таблица поездок (или trace) для {unit_name}")
                 st.dataframe(df, use_container_width=True)
         else:
-            st.warning("❌ Отчёт не содержит результатов.")
-
+            st.warning("❌ Ошибка в отчёте")
+            st.json(report_result)
         
         # --- Карта ---
         car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
