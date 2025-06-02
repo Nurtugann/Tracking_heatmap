@@ -86,7 +86,7 @@ else:
 def get_track(sid, unit_id, day_from_ts, day_to_ts):
     """
     Получаем трек юнита через messages/load_interval за указанный день.
-    Время в UTC, потом приводим к локальному (UTC+5).
+    Время возвращается в UTC; конверсия в локальное делается при отображении отчёта (+5 часов).
     """
     r = requests.get(BASE_URL, params={
         "svc": "messages/load_interval",
@@ -110,13 +110,14 @@ def get_track(sid, unit_id, day_from_ts, day_to_ts):
                     dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
                     dt = datetime.datetime.fromtimestamp(t)
-                t_local = (dt).strftime("%Y-%m-%d %H:%M:%S")
+                # Сохраняем UTC-метку, без смещения
+                utc_str = dt.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
-                t_local = t
+                utc_str = t
             points.append({
                 "lat": m["pos"]["y"],
                 "lon": m["pos"]["x"],
-                "time": t_local,
+                "time": utc_str,
                 "spd": m.get("spd", 0)
             })
     return points
@@ -156,8 +157,8 @@ def get_result_rows(sid, table_index, row_count):
 def detect_region_crossings(points, regions_geojson_path):
     """
     Оптимизированная функция определения переходов между регионами с использованием spatial join.
-    Если в GeoDataFrame отсутствует столбец "shapeName", он создаётся на основе "name".
-    При формировании итогового времени к нему прибавляется +4.99 часов.
+    Время остаётся в UTC, без прибавления +5 часов. 
+    Будем конвертировать в локальное только при отображении отчёта.
     """
     if not points:
         return []
@@ -200,7 +201,8 @@ def detect_region_crossings(points, regions_geojson_path):
     crossings_list = list(crossings.apply(lambda row: {
         "from_region": row["prev_region"],
         "to_region": row["region"],
-        "time": (row["datetime"]).strftime("%Y-%m-%d %H:%M:%S"),
+        # Сохраняем UTC-время без смещения
+        "time": row["datetime"].strftime("%Y-%m-%d %H:%M:%S"),
         "lat": row["lat"],
         "lon": row["lon"]
     }, axis=1))
@@ -209,18 +211,18 @@ def detect_region_crossings(points, regions_geojson_path):
 
 def compute_time_in_responsible_regions(crossings, start_of_day_ts, last_message_ts, responsible_set, initial_region):
     """
-    По списку событий crossings возвращаем словарь вида {region: total_seconds},
+    По списку событий crossings (UTC-время) возвращаем словарь вида {region: total_seconds},
     где region берётся только из responsible_set.
-    Учёт времени идёт до last_message_ts, не до конца суток.
+    Учёт времени идёт до last_message_ts (UTC), не до конца суток.
     
     Если initial_region ∈ responsible_set, считаем, что юнит "вошёл" в него в start_of_day_ts.
-    Каждое crossing с to_region=R фиксирует вход в R, с from_region=R фиксирует выход из R.
+    Каждое crossing с to_region=R фиксирует вход в R (UTC), с from_region=R фиксирует выход (UTC).
     Если после всех crossings юнит всё ещё внутри R, добавляем (last_message_ts - время входа).
     """
     entry_ts_map = {r: None for r in responsible_set}
     durations = {r: 0 for r in responsible_set}
     
-    # Если в 00:00 юнит уже в начальном регионе, и этот регион — ответственный,
+    # Если в 00:00 UTC юнит уже в начальном регионе, и этот регион — ответственный,
     # считаем, что он "вошёл" в него ровно в start_of_day_ts.
     if initial_region in responsible_set:
         entry_ts_map[initial_region] = start_of_day_ts
@@ -243,7 +245,7 @@ def compute_time_in_responsible_regions(crossings, start_of_day_ts, last_message
             durations[r_from] += (exit_ts - entry_ts_map[r_from])
             entry_ts_map[r_from] = None
     
-    # После всех событий: если внутри какого-то r всё ещё entry_ts_map[r] != None,
+    # После всех событий: если внутри какого-то r entry_ts_map[r] != None,
     # значит юнит остался в r до last_message_ts
     for r in responsible_set:
         if entry_ts_map[r] is not None:
@@ -260,7 +262,8 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
        "Первый въезд в ответственные регионы",
        "Комментарий по регионам",
        "Время в ответственных регионах"]
-    за один день (day_from_ts .. day_to_ts).
+    за один день (day_from_ts .. day_to_ts), где все события хранятся в UTC.
+    При отображении отчёта (+5 часов) таблицы преобразуют UTC → локальное.
     """
     results = []
     
@@ -294,7 +297,7 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             my_bar.progress(i / total_units, text=f"{unit_name} — нет данных")
             continue
 
-        # Найдём timestamp последней точки
+        # Найдём timestamp последней точки (UTC)
         last_point_time = track[-1]["time"]
         last_message_dt = datetime.datetime.strptime(last_point_time, "%Y-%m-%d %H:%M:%S")
         last_message_ts = int(last_message_dt.timestamp())
@@ -311,7 +314,7 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         )
         home_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
 
-        # Получаем crossings
+        # Получаем crossings (UTC)
         crossings = detect_region_crossings(track, regions_geojson_path)
 
         # Определяем список ответственных регионов для этого юнита
@@ -337,13 +340,13 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             readable_times_resp.append(f"{region_name}: {hours:02d}:{minutes:02d}:{seconds:02d}")
         time_in_resp_str = "\n".join(readable_times_resp)
 
-        # Визит/возврат для домашнего региона
+        # Визит/возврат для домашнего региона (по UTC-событиям)
         departure_event = None
         return_event = None
         returned_home = None
 
         if crossings:
-            # Находим первый выезд из home_region
+            # Находим первый выезд из home_region (UTC)
             for idx, ev in enumerate(crossings):
                 if ev["from_region"] == home_region:
                     departure_event = ev
@@ -367,7 +370,7 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             region = ev["to_region"]
             if region in responsible_set and region not in first_entry_times:
                 first_entry_times[region] = ev["time"]
-        entry_times_str = '\n'.join(f"{r}: {pd.to_datetime(t).strftime('%H:%M:%S')}"
+        entry_times_str = '\n'.join(f"{r}: { (pd.to_datetime(t) + pd.Timedelta(hours=5)).strftime('%H:%M:%S') }"
                                     for r, t in first_entry_times.items())
 
         visited_resp = responsible_set & visited_regions
@@ -384,13 +387,17 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         else:
             region_comment = f"✅ Посетил все регионы: {format_regions(visited_resp)}"
 
+        # Для полей "Время выезда" и "Время возвращения" конвертируем UTC → местное (+5)
+        dep_local = (pd.to_datetime(departure_event["time"]) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S") if departure_event else None
+        ret_local = (pd.to_datetime(return_event["time"]) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S") if return_event else None
+
         results.append({
             "Юнит": unit_name,
             "Домашний регион": home_region,
-            "Время выезда": departure_event["time"] if departure_event else None,
+            "Время выезда": dep_local,
             "Статус": "Выехал" if departure_event else "Еще не выехал",
             "Вернулся": True if return_event else False,
-            "Время возвращения": return_event["time"] if return_event else None,
+            "Время возвращения": ret_local,
             "Первый въезд в ответственные регионы": entry_times_str,
             "Комментарий по регионам": region_comment,
             "Время в ответственных регионах": time_in_resp_str
@@ -415,7 +422,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
         day_str = cur_date.strftime("%Y-%m-%d")
         st.markdown(f"## 📅 Дата: {day_str}")
 
-        # Пересчитываем метки времени только для этого дня
+        # Пересчитываем метки времени только для этого дня (UTC)
         day_from_ts = int(datetime.datetime.combine(cur_date.date(), datetime.time.min).timestamp())
         day_to_ts   = int(datetime.datetime.combine(cur_date.date(), datetime.time.max).timestamp())
 
@@ -427,17 +434,21 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             report_result = execute_report(SID, res["id"], tpl_id, unit_id, day_from_ts, day_to_ts)
             detailed_points = get_track(SID, unit_id, day_from_ts, day_to_ts)
 
-            # 1) Переходы между регионами
+            # 1) Переходы между регионами (UTC)
             crossings = detect_region_crossings(detailed_points, REGIONS_GEOJSON)
             if crossings:
                 st.subheader("⛳ Переходы между регионами")
+                # При отображении конвертируем UTC → местное (+5) для "time"
                 df_crossings = pd.DataFrame(crossings)
                 df_crossings["Юнит"] = unit_name
-                st.dataframe(df_crossings, use_container_width=True)
+                df_crossings["time_local"] = df_crossings["time"].apply(
+                    lambda t: (pd.to_datetime(t) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+                )
+                st.dataframe(df_crossings.drop(columns=["time"]).rename(columns={"time_local": "time"}), use_container_width=True)
             else:
                 st.info("Нет переходов найдено за этот день.")
 
-            # 2) Таблицы отчёта (unit_trips и unit_trace)
+            # 2) Таблицы отчёта (unit_trips и unit_trace), с конверсией UTC → местное (+5)
             if "reportResult" in report_result:
                 for table_index, table in enumerate(report_result["reportResult"]["tables"]):
                     if table["name"] not in ["unit_trips", "unit_trace"]:
@@ -457,11 +468,13 @@ if st.button("🚀 Запустить отчёты и карту для выбр
 
                             if isinstance(raw_val, str) and re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$', raw_val):
                                 try:
+                                    # Конвертируем UTC → +5 часов
                                     dt = datetime.datetime.strptime(raw_val, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
                                     val = dt.strftime("%Y-%m-%d %H:%M:%S")
                                 except Exception:
                                     val = raw_val
                             elif isinstance(raw_val, (int, float)):
+                                # В случае timestamp тоже +5
                                 dt = datetime.datetime.fromtimestamp(raw_val) + datetime.timedelta(hours=5)
                                 val = dt.strftime("%Y-%m-%d %H:%M:%S")
                             else:
@@ -470,7 +483,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                         parsed_rows.append(line)
 
                     df = pd.DataFrame(parsed_rows, columns=headers)
-                    # Преобразуем колонки "Начало" и "Конец"
+                    # Обрабатываем колонки "Начало" и "Конец" аналогично
                     df["Начало"] = (
                         df
                         .apply(
@@ -485,6 +498,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                             )
                             , axis=1
                         )
+                        + pd.Timedelta(hours=5)
                     ).dt.strftime("%H:%M:%S")
 
                     df["Конец"] = (
@@ -501,6 +515,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                             )
                             , axis=1
                         )
+                        + pd.Timedelta(hours=5)
                     ).dt.strftime("%H:%M:%S")
 
                     df.rename(columns={"Grouping": "День"}, inplace=True)
@@ -562,7 +577,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                         }}
                         return marker;
                     }}
-                }});
+                }});  
                 var cityCluster = L.markerClusterGroup();
                 cityCluster.addLayer(citiesLayer);
                 var overlays = {{
@@ -631,11 +646,15 @@ if st.button("📤 Сформировать отчёт по выезду из д
             not_departed_df = report_df[report_df["Статус"] == "Еще не выехал"]
             departed_df     = report_df[report_df["Статус"] == "Выехал"]
 
-            sheet_not = f"{day_str}_НеВыехал"
-            sheet_dep = f"{day_str}_Выехал"
-
-            not_departed_df.to_excel(writer, sheet_name=sheet_not, index=False)
-            departed_df.to_excel(writer,     sheet_name=sheet_dep, index=False)
+            # Если оба DataFrame пустые, создаём лист "Нет данных"
+            if not not_departed_df.empty or not departed_df.empty:
+                sheet_not = f"{day_str}_НеВыехал"
+                sheet_dep = f"{day_str}_Выехал"
+                not_departed_df.to_excel(writer, sheet_name=sheet_not, index=False)
+                departed_df.to_excel(writer, sheet_name=sheet_dep, index=False)
+            else:
+                dummy = pd.DataFrame({"Сообщение": [f"Нет данных за {day_str}"]})
+                dummy.to_excel(writer, sheet_name=f"{day_str}_НетДанных", index=False)
 
     excel_data = output.getvalue()
 
