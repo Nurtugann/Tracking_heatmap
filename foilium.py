@@ -8,7 +8,6 @@ from shapely.geometry import Point
 import re
 import io
 
-# Настройка страницы
 st.set_page_config(layout="wide")
 st.title("🚗 Карта трека + 📊 Отчёты + 🗺️ Переходы регионов (по нескольким юнитам)")
 
@@ -18,7 +17,6 @@ BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 REGIONS_GEOJSON = "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson"
 CITIES_GEOJSON = "hotosm_kaz_populated_places_points_geojson.geojson"
 
-# --- Функции для логина и получения элементов (кешируются) ---
 @st.cache_data
 def login(token):
     r = requests.get(
@@ -78,7 +76,6 @@ selected_dates = st.date_input(
     help="Для выбора периода: кликните дату, затем удерживайте Shift и выберите вторую дату"
 )
 
-# Проверяем, получили ли мы кортеж из двух дат
 if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
     date_from, date_to = selected_dates
 else:
@@ -113,7 +110,7 @@ def get_track(sid, unit_id, day_from_ts, day_to_ts):
                     dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
                     dt = datetime.datetime.fromtimestamp(t)
-                t_local = (dt + datetime.timedelta(hours=0)).strftime("%Y-%m-%d %H:%M:%S")
+                t_local = (dt).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 t_local = t
             points.append({
@@ -203,60 +200,77 @@ def detect_region_crossings(points, regions_geojson_path):
     crossings_list = list(crossings.apply(lambda row: {
         "from_region": row["prev_region"],
         "to_region": row["region"],
-        "time": (row["datetime"] + datetime.timedelta(hours=4.99)).strftime("%Y-%m-%d %H:%M:%S"),
+        "time": (row["datetime"]).strftime("%Y-%m-%d %H:%M:%S"),
         "lat": row["lat"],
         "lon": row["lon"]
     }, axis=1))
     
     return crossings_list
 
-def compute_time_in_regions(crossings, start_of_day_ts, end_of_day_ts, initial_region):
+def compute_time_in_responsible_regions(crossings, start_of_day_ts, last_message_ts, responsible_set, initial_region):
     """
-    По списку событий crossings (хронологический список dict-объектов с ключами 
-    'from_region', 'to_region', 'time') возвращаем словарь, где 
-        key   = имя региона,
-        value = суммарное время (в секундах), которое юнит провел в этом регионе
-    на интервале [start_of_day_ts, end_of_day_ts].
+    По списку событий crossings возвращаем словарь вида {region: total_seconds},
+    где region берётся только из responsible_set.
+    Учёт времени идёт до last_message_ts, не до конца суток.
+    
+    Если initial_region ∈ responsible_set, считаем, что юнит "вошёл" в него в start_of_day_ts.
+    Каждое crossing с to_region=R фиксирует вход в R, с from_region=R фиксирует выход из R.
+    Если после всех crossings юнит всё ещё внутри R, добавляем (last_message_ts - время входа).
     """
-    region_durations = {}
-    current_region = initial_region
-    last_ts = start_of_day_ts
-
+    entry_ts_map = {r: None for r in responsible_set}
+    durations = {r: 0 for r in responsible_set}
+    
+    # Если в 00:00 юнит уже в начальном регионе, и этот регион — ответственный,
+    # считаем, что он "вошёл" в него ровно в start_of_day_ts.
+    if initial_region in responsible_set:
+        entry_ts_map[initial_region] = start_of_day_ts
+    
     for ev in crossings:
         t_e = int(datetime.datetime.strptime(ev["time"], "%Y-%m-%d %H:%M:%S").timestamp())
-        if t_e < start_of_day_ts or t_e > end_of_day_ts:
+        if t_e < start_of_day_ts or t_e > last_message_ts:
             continue
-
-        dt = t_e - last_ts
-        region_durations[current_region] = region_durations.get(current_region, 0) + dt
-
-        current_region = ev["to_region"]
-        last_ts = t_e
-
-    if last_ts < end_of_day_ts:
-        dt_end = end_of_day_ts - last_ts
-        region_durations[current_region] = region_durations.get(current_region, 0) + dt_end
-
-    return region_durations
+        
+        r_to = ev["to_region"]
+        r_from = ev["from_region"]
+        
+        # Заезд в ответственный регион r_to
+        if r_to in responsible_set and entry_ts_map[r_to] is None:
+            entry_ts_map[r_to] = t_e
+        
+        # Выезд из ответственного региона r_from
+        if r_from in responsible_set and entry_ts_map[r_from] is not None:
+            exit_ts = t_e
+            durations[r_from] += (exit_ts - entry_ts_map[r_from])
+            entry_ts_map[r_from] = None
+    
+    # После всех событий: если внутри какого-то r всё ещё entry_ts_map[r] != None,
+    # значит юнит остался в r до last_message_ts
+    for r in responsible_set:
+        if entry_ts_map[r] is not None:
+            durations[r] += (last_message_ts - entry_ts_map[r])
+            entry_ts_map[r] = None
+    
+    return durations
 
 def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_path, responsible_regions, day_from_ts, day_to_ts):
     """
     Возвращает DataFrame с колонками:
-      ["Юнит", "Домашний регион", "Время выезда с региона", "Статус",
-       "Вернулся в регион", "Время возвращения в регион",
-       "Первый заезд в назначенные регионы", "Комментарий по регионам", "Время в регионах"]
+      ["Юнит", "Домашний регион", "Время выезда", "Статус",
+       "Вернулся", "Время возвращения",
+       "Первый въезд в ответственные регионы",
+       "Комментарий по регионам",
+       "Время в ответственных регионах"]
     за один день (day_from_ts .. day_to_ts).
     """
     results = []
-
-    # Загрузка GeoJSON и создание GeoDataFrame для регионов
+    
     with open(regions_geojson_path, "r", encoding="utf-8") as f:
         regions_geojson = json.load(f)
     gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
     gdf_regions.crs = "EPSG:4326"
     if "shapeName" not in gdf_regions.columns:
         gdf_regions["shapeName"] = gdf_regions.get("name", "")
-
+    
     progress_text = "🔄 Обработка юнитов..."
     my_bar = st.progress(0, text=progress_text)
     total_units = len(units_to_process)
@@ -269,20 +283,25 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             results.append({
                 "Юнит": unit_name,
                 "Домашний регион": None,
-                "Время выезда с региона": None,
+                "Время выезда": None,
                 "Статус": "Нет данных по треку",
-                "Вернулся в регион": None,
-                "Время возвращения в регион": None,
-                "Первый заезд в назначенные регионы": "",
+                "Вернулся": None,
+                "Время возвращения": None,
+                "Первый въезд в ответственные регионы": "",
                 "Комментарий по регионам": "Нет данных по треку",
-                "Время в регионах": ""
+                "Время в ответственных регионах": ""
             })
             my_bar.progress(i / total_units, text=f"{unit_name} — нет данных")
             continue
 
-        # 1) Определяем initial_region (где были в самом начале дня)
+        # Найдём timestamp последней точки
+        last_point_time = track[-1]["time"]
+        last_message_dt = datetime.datetime.strptime(last_point_time, "%Y-%m-%d %H:%M:%S")
+        last_message_ts = int(last_message_dt.timestamp())
+
+        # Определяем домашний регион (по первой точке)
         df_first = pd.DataFrame([track[0]])
-        df_first["geometry"] = df_first.apply(lambda r: Point(r["lon"], r["lat"]), axis=1)
+        df_first["geometry"] = df_first.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
         gdf_first = gpd.GeoDataFrame(df_first, geometry="geometry", crs="EPSG:4326")
         gdf_first_joined = gpd.sjoin(
             gdf_first,
@@ -290,36 +309,41 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             how="left",
             predicate="within"
         )
-        initial_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
+        home_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
 
-        # 2) Список переходов
+        # Получаем crossings
         crossings = detect_region_crossings(track, regions_geojson_path)
 
-        # 3) Подсчитываем, сколько секунд провёл юнит в каждом регионе
-        region_seconds = compute_time_in_regions(
+        # Определяем список ответственных регионов для этого юнита
+        responsible_set = set(responsible_regions.get(unit_name, []))
+
+        # Считаем, сколько секунд провёл юнит в каждом ответственном регионе
+        region_seconds = compute_time_in_responsible_regions(
             crossings,
             start_of_day_ts=day_from_ts,
-            end_of_day_ts=day_to_ts,
-            initial_region=initial_region
+            last_message_ts=last_message_ts,
+            responsible_set=responsible_set,
+            initial_region=home_region
         )
 
-        # 4) Формируем человекочитаемую строку "Регион: ЧЧ:ММ:СС"
-        readable_times = []
+        # Формируем строку "Регион: ЧЧ:ММ:СС"
+        readable_times_resp = []
         for region_name, total_sec in region_seconds.items():
+            if total_sec <= 0:
+                continue
             hours = total_sec // 3600
             minutes = (total_sec % 3600) // 60
             seconds = total_sec % 60
-            readable_times.append(f"{region_name}: {hours:02d}:{minutes:02d}:{seconds:02d}")
-        time_in_regions_str = "\n".join(readable_times)
+            readable_times_resp.append(f"{region_name}: {hours:02d}:{minutes:02d}:{seconds:02d}")
+        time_in_resp_str = "\n".join(readable_times_resp)
 
-        # 5) Определяем домашний регион (в начале дня) и ищем события выезда/возврата
-        home_region = initial_region
+        # Визит/возврат для домашнего региона
         departure_event = None
         return_event = None
         returned_home = None
 
         if crossings:
-            # поиск первого события, где из home_region выехали
+            # Находим первый выезд из home_region
             for idx, ev in enumerate(crossings):
                 if ev["from_region"] == home_region:
                     departure_event = ev
@@ -336,23 +360,22 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
                     if not left_again:
                         returned_home = True
 
-        # 6) Анализ ответственных регионов
+        # Анализ ответственных регионов: первый въезд и статус посещения
         visited_regions = set(e["to_region"] for e in crossings if e["to_region"])
-        responsible = set(responsible_regions.get(unit_name, [])) if responsible_regions else set()
         first_entry_times = {}
         for ev in crossings:
             region = ev["to_region"]
-            if region in responsible and region not in first_entry_times:
+            if region in responsible_set and region not in first_entry_times:
                 first_entry_times[region] = ev["time"]
         entry_times_str = '\n'.join(f"{r}: {pd.to_datetime(t).strftime('%H:%M:%S')}"
                                     for r, t in first_entry_times.items())
 
-        visited_resp = responsible & visited_regions
-        not_visited_resp = responsible - visited_regions
+        visited_resp = responsible_set & visited_regions
+        not_visited_resp = responsible_set - visited_regions
         def format_regions(region_set):
             return ', '.join(sorted(str(r) for r in region_set if pd.notna(r)))
 
-        if not responsible:
+        if not responsible_set:
             region_comment = "❔ Нет назначенных регионов"
         elif not visited_resp:
             region_comment = "❌ Ни один ответственный регион не посещён"
@@ -361,17 +384,16 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         else:
             region_comment = f"✅ Посетил все регионы: {format_regions(visited_resp)}"
 
-        # 7) Добавляем запись в results
         results.append({
             "Юнит": unit_name,
             "Домашний регион": home_region,
-            "Время выезда с региона": departure_event["time"] if departure_event else None,
+            "Время выезда": departure_event["time"] if departure_event else None,
             "Статус": "Выехал" if departure_event else "Еще не выехал",
-            "Вернулся в регион": True if return_event else False,
-            "Время возвращения в регион": return_event["time"] if return_event else None,
-            "Первый заезд в назначенные регионы": entry_times_str,
+            "Вернулся": True if return_event else False,
+            "Время возвращения": return_event["time"] if return_event else None,
+            "Первый въезд в ответственные регионы": entry_times_str,
             "Комментарий по регионам": region_comment,
-            "Время в регионах": time_in_regions_str
+            "Время в ответственных регионах": time_in_resp_str
         })
 
         my_bar.progress(i / total_units, text=f"{unit_name} ✅")
@@ -463,7 +485,6 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                             )
                             , axis=1
                         )
-                        + pd.Timedelta(hours=5)
                     ).dt.strftime("%H:%M:%S")
 
                     df["Конец"] = (
@@ -480,7 +501,6 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                             )
                             , axis=1
                         )
-                        + pd.Timedelta(hours=5)
                     ).dt.strftime("%H:%M:%S")
 
                     df.rename(columns={"Grouping": "День"}, inplace=True)
@@ -533,8 +553,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                             }}
                         }}
                     }}
-                }});
-                
+                }});    
                 var citiesLayer = L.geoJSON({cities_geojson_str}, {{
                     pointToLayer: function(feature, latlng) {{
                         var marker = L.marker(latlng);
@@ -596,16 +615,13 @@ if st.button("📤 Сформировать отчёт по выезду из д
 
     all_dates = pd.date_range(start=date_from, end=date_to, freq="D").to_pydatetime().tolist()
 
-    # Формируем один Excel с несколькими листами (по два листа на каждый день)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for cur_date in all_dates:
             day_str = cur_date.strftime("%Y-%m-%d")
-            # Метки времени начала/конца дня
             day_from_ts = int(datetime.datetime.combine(cur_date.date(), datetime.time.min).timestamp())
             day_to_ts   = int(datetime.datetime.combine(cur_date.date(), datetime.time.max).timestamp())
 
-            # Получаем DataFrame для текущего дня
             report_df = create_departure_report(
                 unit_dict, list(unit_dict.keys()),
                 SID, REGIONS_GEOJSON, responsible_regions,
@@ -615,7 +631,6 @@ if st.button("📤 Сформировать отчёт по выезду из д
             not_departed_df = report_df[report_df["Статус"] == "Еще не выехал"]
             departed_df     = report_df[report_df["Статус"] == "Выехал"]
 
-            # Записываем на два отдельных листа:
             sheet_not = f"{day_str}_НеВыехал"
             sheet_dep = f"{day_str}_Выехал"
 
@@ -624,7 +639,6 @@ if st.button("📤 Сформировать отчёт по выезду из д
 
     excel_data = output.getvalue()
 
-    # Одна кнопка, одна загрузка — без перезапуска между датами
     st.download_button(
         label="📥 Скачать Excel-отчет (по всем дням сразу)",
         data=excel_data,
