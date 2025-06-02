@@ -8,6 +8,8 @@ from shapely.geometry import Point
 import re
 import io
 
+# Тут не интервал времени а по дням
+
 st.cache_data.clear()
 st.set_page_config(layout="wide")
 st.title("🚗 Карта трека + 📊 Отчёты + 🗺️ Переходы регионов (по нескольким юнитам)")

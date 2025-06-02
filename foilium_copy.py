@@ -1,4 +1,10 @@
 import streamlit as st
+# Попытка очистить кеш, если возникнет ошибка — просто пропустим
+try:
+    st.cache_data.clear()
+except Exception:
+    pass
+
 import requests
 import json
 import datetime
