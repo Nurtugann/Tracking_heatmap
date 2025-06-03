@@ -372,27 +372,28 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         visited_regions = set(e["to_region"] for e in crossings if e["to_region"])
         first_entry_times = {}
 
-        # 1) Если home_region входит в responsible_set, считаем, что он «въехал» в 00:00 UTC
+        # 1) Если home_region входит в responsible_set, считаем, что первый въезд – 00:00 местного
         if home_region in responsible_set:
-            first_entry_times[home_region] = day_from_ts  # возьмем начальное время суток (UTC)
+            # day_from_ts – timestamp для 00:00 местного, 
+            # а UTC = местное − 5 часов
+            first_entry_times[home_region] = day_from_ts - 5 * 3600
 
-        # 2) Теперь обрабатываем все реальные переходы
+        # 2) Дальше обрабатываем реальные переходы
         for ev in crossings:
             region = ev["to_region"]
             if region in responsible_set and region not in first_entry_times:
-                # Если это первый въезд в ответственный регион, запомним время
                 first_entry_times[region] = ev["time"]
 
         # Собираем «человеко-читаемую» строку
         entry_times_str = []
         for r, t in first_entry_times.items():
-            # t может быть либо меткой UTC из crossing (строка), либо timestamp (int)
+            # t может быть либо int (UTC-ts), либо строкой UTC из crossing
             if isinstance(t, int):
-                # timestamp → UTC → +5 → строка
+                # переводим UTC → местное (+5h)
                 val = datetime.datetime.fromtimestamp(t) + datetime.timedelta(hours=5)
                 entry_times_str.append(f"{r}: {val.strftime('%H:%M:%S')}")
             else:
-                # t — уже строка UTC, преобразуем в локальное
+                # t — строка UTC, конвертируем в местное
                 val = pd.to_datetime(t) + pd.Timedelta(hours=5)
                 entry_times_str.append(f"{r}: {val.strftime('%H:%M:%S')}")
         entry_times_str = "\n".join(entry_times_str)
@@ -405,23 +406,34 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
 
         if not responsible_set:
             region_comment = "❔ Нет назначенных регионов"
-        elif not visited_resp and home_region not in responsible_set:
-            # Если ни один реальный event не зафиксировал въезд, и home_region не был заранее помечен
-            region_comment = "❌ Ни один ответственный регион не посещён"
-        elif visited_resp or home_region in responsible_set:
-            # Если home_region был в ответственном и засчитан, или другие реальные посещения
-            missed = not_visited_resp
-            hit = visited_resp.union({home_region}) if home_region in responsible_set else visited_resp
+        elif home_region in responsible_set:
+            # Если домашний регион тоже ответственный, то автоматически засчитан
+            hit = visited_resp.union({home_region})
+            missed = responsible_set - hit
             if missed:
                 region_comment = f"✅ Посетил: {format_regions(hit)} | ❌ Не посетил: {format_regions(missed)}"
             else:
                 region_comment = f"✅ Посетил все регионы: {format_regions(hit)}"
-        else:
+        elif not visited_resp:
             region_comment = "❌ Ни один ответственный регион не посещён"
+        else:
+            missed = not_visited_resp
+            if missed:
+                region_comment = f"✅ Посетил: {format_regions(visited_resp)} | ❌ Не посетил: {format_regions(missed)}"
+            else:
+                region_comment = f"✅ Посетил все регионы: {format_regions(visited_resp)}"
 
         # Для полей "Время выезда" и "Время возвращения" конвертируем UTC → местное (+5)
-        dep_local = (pd.to_datetime(departure_event["time"]) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S") if departure_event else None
-        ret_local = (pd.to_datetime(return_event["time"]) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S") if return_event else None
+        dep_local = (
+            (pd.to_datetime(departure_event["time"]) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+            if departure_event else
+            None
+        )
+        ret_local = (
+            (pd.to_datetime(return_event["time"]) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+            if return_event else
+            None
+        )
 
         results.append({
             "Юнит": unit_name,
@@ -681,13 +693,14 @@ if st.button("📤 Сформировать отчёт по выезду из д
             not_departed_df = report_df[report_df["Статус"] == "Еще не выехал"]
             departed_df     = report_df[report_df["Статус"] == "Выехал"]
 
-            # Если оба DataFrame пустые, создаём лист "Нет данных"
+            # Если хотя бы один DF не пуст, записываем их
             if not not_departed_df.empty or not departed_df.empty:
                 sheet_not = f"{day_str}_НеВыехал"
                 sheet_dep = f"{day_str}_Выехал"
                 not_departed_df.to_excel(writer, sheet_name=sheet_not, index=False)
                 departed_df.to_excel(writer, sheet_name=sheet_dep, index=False)
             else:
+                # Иначе — лист «Нет данных»
                 dummy = pd.DataFrame({"Сообщение": [f"Нет данных за {day_str}"]})
                 dummy.to_excel(writer, sheet_name=f"{day_str}_НетДанных", index=False)
 
