@@ -23,7 +23,6 @@ BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 REGIONS_GEOJSON = "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson"
 CITIES_GEOJSON = "hotosm_kaz_populated_places_points_geojson.geojson"
 
-@st.cache_data
 def login(token):
     r = requests.get(
         BASE_URL,
@@ -34,7 +33,6 @@ def login(token):
     )
     return r.json().get("eid")
 
-@st.cache_data
 def get_items(sid, item_type, flags):
     r = requests.get(
         BASE_URL,
