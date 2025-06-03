@@ -1,4 +1,5 @@
 import streamlit as st
+
 # Попытка очистить кеш, если возникнет ошибка — просто пропустим
 try:
     st.cache_data.clear()
@@ -370,26 +371,53 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         # Анализ ответственных регионов: первый въезд и статус посещения
         visited_regions = set(e["to_region"] for e in crossings if e["to_region"])
         first_entry_times = {}
+
+        # 1) Если home_region входит в responsible_set, считаем, что он «въехал» в 00:00 UTC
+        if home_region in responsible_set:
+            first_entry_times[home_region] = day_from_ts  # возьмем начальное время суток (UTC)
+
+        # 2) Теперь обрабатываем все реальные переходы
         for ev in crossings:
             region = ev["to_region"]
             if region in responsible_set and region not in first_entry_times:
+                # Если это первый въезд в ответственный регион, запомним время
                 first_entry_times[region] = ev["time"]
-        entry_times_str = '\n'.join(f"{r}: { (pd.to_datetime(t) + pd.Timedelta(hours=5)).strftime('%H:%M:%S') }"
-                                    for r, t in first_entry_times.items())
+
+        # Собираем «человеко-читаемую» строку
+        entry_times_str = []
+        for r, t in first_entry_times.items():
+            # t может быть либо меткой UTC из crossing (строка), либо timestamp (int)
+            if isinstance(t, int):
+                # timestamp → UTC → +5 → строка
+                val = datetime.datetime.fromtimestamp(t) + datetime.timedelta(hours=5)
+                entry_times_str.append(f"{r}: {val.strftime('%H:%M:%S')}")
+            else:
+                # t — уже строка UTC, преобразуем в локальное
+                val = pd.to_datetime(t) + pd.Timedelta(hours=5)
+                entry_times_str.append(f"{r}: {val.strftime('%H:%M:%S')}")
+        entry_times_str = "\n".join(entry_times_str)
 
         visited_resp = responsible_set & visited_regions
         not_visited_resp = responsible_set - visited_regions
+
         def format_regions(region_set):
-            return ', '.join(sorted(str(r) for r in region_set if pd.notna(r)))
+            return ", ".join(sorted(str(r) for r in region_set if pd.notna(r)))
 
         if not responsible_set:
             region_comment = "❔ Нет назначенных регионов"
-        elif not visited_resp:
+        elif not visited_resp and home_region not in responsible_set:
+            # Если ни один реальный event не зафиксировал въезд, и home_region не был заранее помечен
             region_comment = "❌ Ни один ответственный регион не посещён"
-        elif not_visited_resp:
-            region_comment = f"✅ Посетил: {format_regions(visited_resp)} | ❌ Не посетил: {format_regions(not_visited_resp)}"
+        elif visited_resp or home_region in responsible_set:
+            # Если home_region был в ответственном и засчитан, или другие реальные посещения
+            missed = not_visited_resp
+            hit = visited_resp.union({home_region}) if home_region in responsible_set else visited_resp
+            if missed:
+                region_comment = f"✅ Посетил: {format_regions(hit)} | ❌ Не посетил: {format_regions(missed)}"
+            else:
+                region_comment = f"✅ Посетил все регионы: {format_regions(hit)}"
         else:
-            region_comment = f"✅ Посетил все регионы: {format_regions(visited_resp)}"
+            region_comment = "❌ Ни один ответственный регион не посещён"
 
         # Для полей "Время выезда" и "Время возвращения" конвертируем UTC → местное (+5)
         dep_local = (pd.to_datetime(departure_event["time"]) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S") if departure_event else None
@@ -448,7 +476,10 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                 df_crossings["time_local"] = df_crossings["time"].apply(
                     lambda t: (pd.to_datetime(t) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
                 )
-                st.dataframe(df_crossings.drop(columns=["time"]).rename(columns={"time_local": "time"}), use_container_width=True)
+                st.dataframe(
+                    df_crossings.drop(columns=["time"]).rename(columns={"time_local": "time"}),
+                    use_container_width=True
+                )
             else:
                 st.info("Нет переходов найдено за этот день.")
 
