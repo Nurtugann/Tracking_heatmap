@@ -653,7 +653,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             else:
                 st.info("Нет остановок > 15 минут вне домашнего региона за этот день.")
 
-            # 4) Отметка ⛔ точек нулевой скорости вне домашнего региона, где длительность > 15 мин
+            # 4) Отметка ⛔ точек нулевой скорости…
             zero_speed_points = []
 
             # Подготовим DataFrame с datetime и скоростью
@@ -664,57 +664,39 @@ if st.button("🚀 Запустить отчёты и карту для выбр
 
             in_zero = False
             segment_start = None
-            segment_points = []
+            segment_first = None
 
             for idx, row in df.iterrows():
                 if row["is_zero_speed"]:
                     if not in_zero:
-                        # Начало нового сегмента
+                        # Начало нового сегмента — запомним только первый ряд
                         in_zero = True
                         segment_start = row["datetime_utc"]
-                        segment_points = [row]
-                    else:
-                        segment_points.append(row)
+                        segment_first = row
                 else:
                     if in_zero:
-                        # Закончился сегмент
+                        # Конец сегмента
                         in_zero = False
-                        segment_end = row["datetime_utc"]
-                        duration = (segment_end - segment_start).total_seconds()
+                        duration = (row["datetime_utc"] - segment_start).total_seconds()
                         if duration >= 15 * 60:
-                            for pt in segment_points:
-                                pt_geom = gpd.GeoDataFrame(
-                                    {"geometry": [Point(pt["lon"], pt["lat"])]},
-                                    crs="EPSG:4326"
-                                )
-                                joined = gpd.sjoin(pt_geom, gdf_regions[["geometry", "shapeName"]], how="left", predicate="within")
-                                region = joined.iloc[0]["shapeName"] if not joined.empty else None
-                                if region != home_region:
-                                    zero_speed_points.append({
-                                        "lat": pt["lat"],
-                                        "lon": pt["lon"],
-                                        "time": pt["datetime_utc"].strftime("%Y-%m-%d %H:%M:%S")
-                                    })
-
-            # Обработка незавершённого сегмента в конце
-            if in_zero and segment_points:
-                segment_end = segment_points[-1]["datetime_utc"]
-                duration = (segment_end - segment_start).total_seconds()
-                if duration >= 15 * 60:
-                    for pt in segment_points:
-                        pt_geom = gpd.GeoDataFrame(
-                            {"geometry": [Point(pt["lon"], pt["lat"])]},
-                            crs="EPSG:4326"
-                        )
-                        joined = gpd.sjoin(pt_geom, gdf_regions[["geometry", "shapeName"]], how="left", predicate="within")
-                        region = joined.iloc[0]["shapeName"] if not joined.empty else None
-                        if region != home_region:
+                            # Используем первую точку segment_first
+                            local_time = (segment_start + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
                             zero_speed_points.append({
-                                "lat": pt["lat"],
-                                "lon": pt["lon"],
-                                "time": pt["datetime_utc"].strftime("%Y-%m-%d %H:%M:%S")
+                                "lat": segment_first["lat"],
+                                "lon": segment_first["lon"],
+                                "time": local_time
                             })
 
+            # Если сегмент остался незакрытым в конце:
+            if in_zero:
+                duration = (df.iloc[-1]["datetime_utc"] - segment_start).total_seconds()
+                if duration >= 15 * 60:
+                    local_time = (segment_start + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+                    zero_speed_points.append({
+                        "lat": segment_first["lat"],
+                        "lon": segment_first["lon"],
+                        "time": local_time
+                    })
 
 
             # 5) Карта для этого дня с треком, последней точкой, остановками и точками нулевой скорости
@@ -848,7 +830,6 @@ if st.button("🚀 Запустить отчёты и карту для выбр
 
     st.success("✅ Построение отчетов и карт завершено.")
 
-# … (остальная часть кода без изменений) …
 
 # ------------------ Блок 2: "📤 Сформировать отчёт по выезду из домашнего региона" ------------------
 if st.button("📤 Сформировать отчёт по выезду из домашнего региона (Для всех) (Excel + таблицы)"):
