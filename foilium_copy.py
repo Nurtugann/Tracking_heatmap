@@ -519,80 +519,6 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             else:
                 st.info("Нет переходов найдено за этот день.")
 
-            # 2) Таблицы отчёта (unit_trips и unit_trace), с конверсией UTC → местное (+5)
-            if "reportResult" in report_result:
-                for table_index, table in enumerate(report_result["reportResult"]["tables"]):
-                    if table["name"] not in ["unit_trips", "unit_trace"]:
-                        continue
-                    row_count = table["rows"]
-                    headers   = table["header"]
-                    data      = get_result_rows(SID, table_index, row_count)
-
-                    parsed_rows = []
-                    for row_obj in data:
-                        line = []
-                        for cell in row_obj["c"]:
-                            if isinstance(cell, dict) and "t" in cell:
-                                raw_val = cell["t"]
-                            else:
-                                raw_val = cell
-
-                            if isinstance(raw_val, str) and re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$', raw_val):
-                                try:
-                                    dt  = datetime.datetime.strptime(raw_val, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
-                                    val = dt.strftime("%Y-%m-%d %H:%M:%S")
-                                except Exception:
-                                    val = raw_val
-                            elif isinstance(raw_val, (int, float)):
-                                dt  = datetime.datetime.fromtimestamp(raw_val) + datetime.timedelta(hours=5)
-                                val = dt.strftime("%Y-%m-%d %H:%M:%S")
-                            else:
-                                val = raw_val
-                            line.append(val)
-                        parsed_rows.append(line)
-
-                    df = pd.DataFrame(parsed_rows, columns=headers)
-                    df["Начало"] = (
-                        df
-                        .apply(
-                            lambda row: (
-                                pd.to_datetime(str(row["Начало"]), format="%Y-%m-%d %H:%M:%S", errors="raise")
-                            )
-                            if re.match(r"^\d{4}-\d{2}-\d{2}", str(row["Начало"]))
-                            else pd.to_datetime(
-                                f"{row['Grouping']} {row['Начало']}",
-                                format="%Y-%m-%d %H:%M:%S",
-                                errors="coerce"
-                            )
-                            , axis=1
-                        )
-                        + pd.Timedelta(hours=5)
-                    ).dt.strftime("%H:%M:%S")
-
-                    df["Конец"] = (
-                        df
-                        .apply(
-                            lambda row: (
-                                pd.to_datetime(str(row["Конец"]), format="%Y-%m-%d %H:%M:%S", errors="raise")
-                            )
-                            if re.match(r"^\d{4}-\d{2}-\d{2}", str(row["Конец"]))
-                            else pd.to_datetime(
-                                f"{row['Grouping']} {row['Конец']}",
-                                format="%Y-%m-%d %H:%M:%S",
-                                errors="coerce"
-                            )
-                            , axis=1
-                        )
-                        + pd.Timedelta(hours=5)
-                    ).dt.strftime("%H:%M:%S")
-
-                    df.rename(columns={"Grouping": "День"}, inplace=True)
-                    st.markdown(f"#### 📋 Таблица '{table['name']}' для {unit_name}")
-                    st.dataframe(df, use_container_width=True)
-            else:
-                st.warning(f"❌ Ошибка в отчёте за {day_str} для {unit_name}")
-                st.json(report_result)
-
             # 3) Детекция остановок (UTC → местное + отметка на карте)
             stops_utc = detect_stops(detailed_points, zero_threshold=1)
 
@@ -654,42 +580,43 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                 st.info("Нет остановок > 15 минут вне домашнего региона за этот день.")
 
             # ——— Объединяем переходы и остановки в одну хронологическую таблицу ———
-
-            # 1) Приводим переходы к единому виду
-            df_cross = (
-                df_crossings
-                .drop(columns=["time"])
-                .rename(columns={"time_local": "time"})
-                .assign(
-                    type="crossing",
-                    duration=""
+            try:
+                # 1) Приводим переходы к единому виду
+                df_cross = (
+                    df_crossings
+                    .drop(columns=["time"])
+                    .rename(columns={"time_local": "time"})
+                    .assign(
+                        type="crossing",
+                        duration=""
+                    )
+                    .loc[:, ["time", "type", "from_region", "to_region", "lat", "lon", "duration"]]
                 )
-                .loc[:, ["time", "type", "from_region", "to_region", "lat", "lon", "duration"]]
-            )
 
-            # 2) Приводим остановки к тому же виду
-            df_stop = (
-                df_stops
-                .rename(columns={"start_local": "time", "duration": "duration"})
-                .assign(
-                    type="stop",
-                    from_region="", to_region=""
+                # 2) Приводим остановки к тому же виду
+                df_stop = (
+                    df_stops
+                    .rename(columns={"start_local": "time", "duration": "duration"})
+                    .assign(
+                        type="stop",
+                        from_region="", to_region=""
+                    )
+                    .loc[:, ["time", "type", "from_region", "to_region", "lat", "lon", "duration"]]
                 )
-                .loc[:, ["time", "type", "from_region", "to_region", "lat", "lon", "duration"]]
-            )
 
-            # 3) Склеиваем и сортируем по времени
-            combined = (
-                pd.concat([df_cross, df_stop], ignore_index=True)
-                .assign(time=lambda df: pd.to_datetime(df["time"]))
-                .sort_values("time")
-                .reset_index(drop=True)
-            )
+                # 3) Склеиваем и сортируем по времени
+                combined = (
+                    pd.concat([df_cross, df_stop], ignore_index=True)
+                    .assign(time=lambda df: pd.to_datetime(df["time"]))
+                    .sort_values("time")
+                    .reset_index(drop=True)
+                )
 
-            # 4) Выводим результат
-            st.subheader("⏱️ Все события (переходы и остановки) в хронологическом порядке")
-            st.dataframe(combined, use_container_width=True)
-
+                # 4) Выводим результат
+                st.subheader("⏱️ Все события (переходы и остановки) в хронологическом порядке")
+                st.dataframe(combined, use_container_width=True)
+            except:
+                st.info("Нет данных для вывода.")
 
             # 4) Отметка ⛔ точек нулевой скорости…
             zero_speed_points = []
