@@ -700,41 +700,59 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             df["spd"] = pd.to_numeric(df["spd"], errors="coerce").fillna(0)
             df["is_zero_speed"] = df["spd"] <= ZERO_SPEED_THRESHOLD
 
-            in_zero = False
+            in_zero       = False
             segment_start = None
             segment_first = None
 
             for idx, row in df.iterrows():
                 if row["is_zero_speed"]:
                     if not in_zero:
-                        # Начало нового сегмента — запомним только первый ряд
-                        in_zero = True
+                        # Начало нового сегмента — запомним только первую точку
+                        in_zero       = True
                         segment_start = row["datetime_utc"]
                         segment_first = row
                 else:
                     if in_zero:
                         # Конец сегмента
-                        in_zero = False
+                        in_zero  = False
                         duration = (row["datetime_utc"] - segment_start).total_seconds()
                         if duration >= 15 * 60:
-                            # Используем первую точку segment_first
-                            local_time = (segment_start + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
-                            zero_speed_points.append({
-                                "lat": segment_first["lat"],
-                                "lon": segment_first["lon"],
-                                "time": local_time
-                            })
+                            # Определяем, в каком регионе первая точка
+                            pt_gdf = gpd.GeoDataFrame(
+                                {"geometry":[Point(segment_first["lon"], segment_first["lat"])]},
+                                crs="EPSG:4326"
+                            )
+                            joined = gpd.sjoin(pt_gdf, gdf_regions[["geometry","shapeName"]], how="left", predicate="within")
+                            seg_region = joined.iloc[0]["shapeName"] if not joined.empty else None
 
-            # Если сегмент остался незакрытым в конце:
+                            # Добавляем только если не в домашнем регионе
+                            if seg_region != home_region:
+                                local_time = (segment_start + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+                                zero_speed_points.append({
+                                    "lat":  segment_first["lat"],
+                                    "lon":  segment_first["lon"],
+                                    "time": local_time
+                                })
+
+            # Обработка незавершённого сегмента в конце
             if in_zero:
                 duration = (df.iloc[-1]["datetime_utc"] - segment_start).total_seconds()
                 if duration >= 15 * 60:
-                    local_time = (segment_start + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
-                    zero_speed_points.append({
-                        "lat": segment_first["lat"],
-                        "lon": segment_first["lon"],
-                        "time": local_time
-                    })
+                    pt_gdf = gpd.GeoDataFrame(
+                        {"geometry":[Point(segment_first["lon"], segment_first["lat"])]},
+                        crs="EPSG:4326"
+                    )
+                    joined = gpd.sjoin(pt_gdf, gdf_regions[["geometry","shapeName"]], how="left", predicate="within")
+                    seg_region = joined.iloc[0]["shapeName"] if not joined.empty else None
+
+                    if seg_region != home_region:
+                        local_time = (segment_start + datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+                        zero_speed_points.append({
+                            "lat":  segment_first["lat"],
+                            "lon":  segment_first["lon"],
+                            "time": local_time
+                        })
+
 
 
             # 5) Карта для этого дня с треком, последней точкой, остановками и точками нулевой скорости
