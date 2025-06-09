@@ -23,6 +23,7 @@ TOKEN = "c611c2bab48335e36a4b59be460c57d2BF8416B73C4A65F2B8A88A5848E97CD4471F14C
 BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 REGIONS_GEOJSON = "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson"
 CITIES_GEOJSON = "hotosm_kaz_populated_places_points_geojson.geojson"
+ZERO_SPEED_THRESHOLD = 0  # Скорость <= 0 считаем как "остановка"
 
 def login(token):
     r = requests.get(
@@ -108,22 +109,29 @@ def get_track(sid, unit_id, day_from_ts, day_to_ts):
     js = r.json()
     points = []
     for m in js.get("messages", []):
-        if m.get("pos"):
+        pos = m.get("pos") or {}
+        # Пытаемся получить скорость из pos["s"], а если нет – взять из m.get("spd")
+        raw_speed = pos.get("s", m.get("spd", 0))
+        try:
+            speed = float(raw_speed)
+        except Exception:
+            speed = 0.0
+
+        if pos:
             t = m.get("t")
             try:
                 if isinstance(t, str):
                     dt = datetime.datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
                 else:
                     dt = datetime.datetime.fromtimestamp(t)
-                # Сохраняем UTC-метку, без смещения
                 utc_str = dt.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 utc_str = t
             points.append({
-                "lat": m["pos"]["y"],
-                "lon": m["pos"]["x"],
+                "lat": pos.get("y"),
+                "lon": pos.get("x"),
                 "time": utc_str,
-                "spd": m.get("spd", 0)
+                "spd": speed
             })
     return points
 
@@ -206,7 +214,6 @@ def detect_region_crossings(points, regions_geojson_path):
     crossings_list = list(crossings.apply(lambda row: {
         "from_region": row["prev_region"],
         "to_region": row["region"],
-        # Сохраняем UTC-время без смещения
         "time": row["datetime"].strftime("%Y-%m-%d %H:%M:%S"),
         "lat": row["lat"],
         "lon": row["lon"]
@@ -214,71 +221,101 @@ def detect_region_crossings(points, regions_geojson_path):
     
     return crossings_list
 
+def detect_stops(points, zero_threshold=1):
+    """
+    Находит интервалы, когда транспорт стоит:
+    - «остановка» начинается, когда spd <= zero_threshold, 
+      а до этого spd > zero_threshold;
+    - «движение» восстанавливается, когда spd > zero_threshold после серии точек с spd <= zero_threshold.
+    """
+    if not points:
+        return []
+
+    df = pd.DataFrame(points)
+    df["datetime_utc"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    df["spd"] = pd.to_numeric(df["spd"], errors="coerce").fillna(0)
+
+    df["is_stopped"] = df["spd"] <= zero_threshold
+
+    stops = []
+    in_stop = False
+    stop_start_ts = None
+    stop_start_idx = None
+
+    for idx, row in df.iterrows():
+        if not in_stop:
+            prev_is_stopped = df.loc[idx - 1, "is_stopped"] if idx > 0 else False
+            if row["is_stopped"] and not prev_is_stopped:
+                in_stop = True
+                stop_start_ts = row["datetime_utc"]
+                stop_start_idx = idx
+        else:
+            if not row["is_stopped"]:
+                stop_end_ts = row["datetime_utc"]
+                lat = df.loc[stop_start_idx, "lat"]
+                lon = df.loc[stop_start_idx, "lon"]
+                stops.append({
+                    "stop_start_utc": stop_start_ts,
+                    "stop_end_utc": stop_end_ts,
+                    "lat": lat,
+                    "lon": lon
+                })
+                in_stop = False
+                stop_start_ts = None
+                stop_start_idx = None
+
+    if in_stop and stop_start_ts is not None:
+        lat = df.loc[stop_start_idx, "lat"]
+        lon = df.loc[stop_start_idx, "lon"]
+        stops.append({
+            "stop_start_utc": stop_start_ts,
+            "stop_end_utc": None,
+            "lat": lat,
+            "lon": lon
+        })
+
+    return stops
+
 def compute_time_in_responsible_regions(crossings, start_of_day_ts, last_message_ts, responsible_set, initial_region):
-    """
-    По списку событий crossings (UTC-время) возвращаем словарь вида {region: total_seconds},
-    где region берётся только из responsible_set.
-    Учёт времени идёт до last_message_ts (UTC), не до конца суток.
-    
-    Если initial_region ∈ responsible_set, считаем, что юнит "вошёл" в него в start_of_day_ts.
-    Каждое crossing с to_region=R фиксирует вход в R (UTC), с from_region=R фиксирует выход (UTC).
-    Если после всех crossings юнит всё ещё внутри R, добавляем (last_message_ts - время входа).
-    """
     entry_ts_map = {r: None for r in responsible_set}
     durations = {r: 0 for r in responsible_set}
-    
-    # Если в 00:00 UTC юнит уже в начальном регионе, и этот регион — ответственный,
-    # считаем, что он "вошёл" в него ровно в start_of_day_ts.
+
     if initial_region in responsible_set:
         entry_ts_map[initial_region] = start_of_day_ts
-    
+
     for ev in crossings:
         t_e = int(datetime.datetime.strptime(ev["time"], "%Y-%m-%d %H:%M:%S").timestamp())
         if t_e < start_of_day_ts or t_e > last_message_ts:
             continue
-        
+
         r_to = ev["to_region"]
         r_from = ev["from_region"]
-        
-        # Заезд в ответственный регион r_to
+
         if r_to in responsible_set and entry_ts_map[r_to] is None:
             entry_ts_map[r_to] = t_e
-        
-        # Выезд из ответственного региона r_from
+
         if r_from in responsible_set and entry_ts_map[r_from] is not None:
             exit_ts = t_e
             durations[r_from] += (exit_ts - entry_ts_map[r_from])
             entry_ts_map[r_from] = None
-    
-    # После всех событий: если внутри какого-то r entry_ts_map[r] != None,
-    # значит юнит остался в r до last_message_ts
+
     for r in responsible_set:
         if entry_ts_map[r] is not None:
             durations[r] += (last_message_ts - entry_ts_map[r])
             entry_ts_map[r] = None
-    
+
     return durations
 
 def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_path, responsible_regions, day_from_ts, day_to_ts):
-    """
-    Возвращает DataFrame с колонками:
-      ["Юнит", "Домашний регион", "Время выезда", "Статус",
-       "Вернулся", "Время возвращения",
-       "Первый въезд в ответственные регионы",
-       "Комментарий по регионам",
-       "Время в ответственных регионах"]
-    за один день (day_from_ts .. day_to_ts), где все события хранятся в UTC.
-    При отображении отчёта (+5 часов) таблицы преобразуют UTC → локальное.
-    """
     results = []
-    
+
     with open(regions_geojson_path, "r", encoding="utf-8") as f:
         regions_geojson = json.load(f)
     gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
     gdf_regions.crs = "EPSG:4326"
     if "shapeName" not in gdf_regions.columns:
         gdf_regions["shapeName"] = gdf_regions.get("name", "")
-    
+
     progress_text = "🔄 Обработка юнитов..."
     my_bar = st.progress(0, text=progress_text)
     total_units = len(units_to_process)
@@ -351,14 +388,13 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         returned_home = None
 
         if crossings:
-            # Находим первый выезд из home_region (UTC)
-            for idx, ev in enumerate(crossings):
+            for idx2, ev in enumerate(crossings):
                 if ev["from_region"] == home_region:
                     departure_event = ev
                     break
 
             if departure_event:
-                after_dep = crossings[idx+1:]
+                after_dep = crossings[idx2+1:]
                 return_indices = [j for j, e in enumerate(after_dep) if e["to_region"] == home_region]
                 if return_indices:
                     last_return_idx = return_indices[-1]
@@ -368,32 +404,23 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
                     if not left_again:
                         returned_home = True
 
-        # Анализ ответственных регионов: первый въезд и статус посещения
         visited_regions = set(e["to_region"] for e in crossings if e["to_region"])
         first_entry_times = {}
 
-        # 1) Если home_region входит в responsible_set, считаем, что первый въезд – 00:00 местного
         if home_region in responsible_set:
-            # day_from_ts – timestamp для 00:00 местного, 
-            # а UTC = местное − 5 часов
             first_entry_times[home_region] = day_from_ts - 5 * 3600
 
-        # 2) Дальше обрабатываем реальные переходы
         for ev in crossings:
             region = ev["to_region"]
             if region in responsible_set and region not in first_entry_times:
                 first_entry_times[region] = ev["time"]
 
-        # Собираем «человеко-читаемую» строку
         entry_times_str = []
         for r, t in first_entry_times.items():
-            # t может быть либо int (UTC-ts), либо строкой UTC из crossing
             if isinstance(t, int):
-                # переводим UTC → местное (+5h)
                 val = datetime.datetime.fromtimestamp(t) + datetime.timedelta(hours=5)
                 entry_times_str.append(f"{r}: {val.strftime('%H:%M:%S')}")
             else:
-                # t — строка UTC, конвертируем в местное
                 val = pd.to_datetime(t) + pd.Timedelta(hours=5)
                 entry_times_str.append(f"{r}: {val.strftime('%H:%M:%S')}")
         entry_times_str = "\n".join(entry_times_str)
@@ -407,7 +434,6 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
         if not responsible_set:
             region_comment = "❔ Нет назначенных регионов"
         elif home_region in responsible_set:
-            # Если домашний регион тоже ответственный, то автоматически засчитан
             hit = visited_resp.union({home_region})
             missed = responsible_set - hit
             if missed:
@@ -423,7 +449,6 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             else:
                 region_comment = f"✅ Посетил все регионы: {format_regions(visited_resp)}"
 
-        # Для полей "Время выезда" и "Время возвращения" конвертируем UTC → местное (+5)
         dep_local = (
             (pd.to_datetime(departure_event["time"]) + pd.Timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
             if departure_event else
@@ -459,6 +484,9 @@ with open(CITIES_GEOJSON, "r", encoding="utf-8") as f:
     cities_geojson_str = json.dumps(json.load(f))
 
 # ------------------ Блок 1: "🚀 Запустить отчёты и карту для выбранных юнитов" ------------------
+# … (весь предыдущий код остаётся без изменений) …
+
+# ------------------ Блок 1: "🚀 Запустить отчёты и карту для выбранных юнитов" ------------------
 if st.button("🚀 Запустить отчёты и карту для выбранных юнитов"):
     all_dates = pd.date_range(start=date_from, end=date_to, freq="D").to_pydatetime().tolist()
 
@@ -475,14 +503,13 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             unit_id = unit_dict[unit_name]
 
             # Получаем отчёт и трек за текущий день
-            report_result = execute_report(SID, res["id"], tpl_id, unit_id, day_from_ts, day_to_ts)
+            report_result   = execute_report(SID, res["id"], tpl_id, unit_id, day_from_ts, day_to_ts)
             detailed_points = get_track(SID, unit_id, day_from_ts, day_to_ts)
 
             # 1) Переходы между регионами (UTC)
             crossings = detect_region_crossings(detailed_points, REGIONS_GEOJSON)
             if crossings:
                 st.subheader("⛳ Переходы между регионами")
-                # При отображении конвертируем UTC → местное (+5) для "time"
                 df_crossings = pd.DataFrame(crossings)
                 df_crossings["Юнит"] = unit_name
                 df_crossings["time_local"] = df_crossings["time"].apply(
@@ -501,8 +528,8 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                     if table["name"] not in ["unit_trips", "unit_trace"]:
                         continue
                     row_count = table["rows"]
-                    headers = table["header"]
-                    data = get_result_rows(SID, table_index, row_count)
+                    headers   = table["header"]
+                    data      = get_result_rows(SID, table_index, row_count)
 
                     parsed_rows = []
                     for row_obj in data:
@@ -515,14 +542,12 @@ if st.button("🚀 Запустить отчёты и карту для выбр
 
                             if isinstance(raw_val, str) and re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$', raw_val):
                                 try:
-                                    # Конвертируем UTC → +5 часов
-                                    dt = datetime.datetime.strptime(raw_val, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
+                                    dt  = datetime.datetime.strptime(raw_val, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(hours=5)
                                     val = dt.strftime("%Y-%m-%d %H:%M:%S")
                                 except Exception:
                                     val = raw_val
                             elif isinstance(raw_val, (int, float)):
-                                # В случае timestamp тоже +5
-                                dt = datetime.datetime.fromtimestamp(raw_val) + datetime.timedelta(hours=5)
+                                dt  = datetime.datetime.fromtimestamp(raw_val) + datetime.timedelta(hours=5)
                                 val = dt.strftime("%Y-%m-%d %H:%M:%S")
                             else:
                                 val = raw_val
@@ -530,7 +555,6 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                         parsed_rows.append(line)
 
                     df = pd.DataFrame(parsed_rows, columns=headers)
-                    # Обрабатываем колонки "Начало" и "Конец" аналогично
                     df["Начало"] = (
                         df
                         .apply(
@@ -572,23 +596,91 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                 st.warning(f"❌ Ошибка в отчёте за {day_str} для {unit_name}")
                 st.json(report_result)
 
-            # 3) Карта для этого дня
-            coords = [[p["lat"], p["lon"]] for p in detailed_points]
-            last = coords[-1] if coords else None
+            # 3) Детекция остановок (UTC → местное + отметка на карте)
+            stops_utc = detect_stops(detailed_points, zero_threshold=1)
 
-            car_icon_url = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
-            coords_json = json.dumps(coords)
-            last_point_json = json.dumps(last)
+            # === ИЗМЕНЕНИЕ: фильтруем остановки по длительности > 10 минут ===
+            filtered_stops = []
+            for s in stops_utc:
+                start_ts = s["stop_start_utc"]
+                if s["stop_end_utc"] is not None:
+                    end_ts = s["stop_end_utc"]
+                    duration = (end_ts - start_ts).total_seconds()
+                    if duration > 10 * 60:  # оставляем только если > 10 минут
+                        filtered_stops.append(s)
+                # если остановка не закончилась до конца дня (stop_end_utc == None),
+                # можно вычислять продолжительность до последней точки: 
+                # здесь, например, опустим такие «незаконченные» (или включим по желанию)
+            # =========================== конец изменения ===========================
+
+            stops_info = []
+            for s in filtered_stops:
+                start_local = s["stop_start_utc"] + datetime.timedelta(hours=5)
+                if s["stop_end_utc"] is not None:
+                    end_local    = s["stop_end_utc"] + datetime.timedelta(hours=5)
+                    duration_sec = (s["stop_end_utc"] - s["stop_start_utc"]).total_seconds()
+                    # Форматируем длительность в «чч:мм:сс»
+                    hours   = int(duration_sec // 3600)
+                    minutes = int((duration_sec % 3600) // 60)
+                    seconds = int(duration_sec % 60)
+                    duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                    end_str = end_local.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    duration_str = ""
+                    end_str = ""
+
+                stops_info.append({
+                    "lat": s["lat"],
+                    "lon": s["lon"],
+                    "start_local": start_local.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end_local": end_str,
+                    "duration": duration_str
+                })
+
+            if stops_info:
+                df_stops = pd.DataFrame(stops_info)
+                st.subheader("🛑 Остановки > 10 минут (локальное время)")
+                st.dataframe(df_stops, use_container_width=True)
+            else:
+                st.info("Нет остановок > 10 минут за этот день.")
+
+            # 4) Отметка точек с нулевой скоростью (или NaN) – готовим список для карты
+            zero_speed_points = []
+            for p in detailed_points:
+                spd_val = p.get("spd", None)
+                if spd_val is None or spd_val <= ZERO_SPEED_THRESHOLD:
+                    # Если спид нет (None) или ≤ 0 – считаем стоящей «точкой нулевой скорости»
+                    zero_speed_points.append({
+                        "lat": p["lat"],
+                        "lon": p["lon"],
+                        "time": p["time"]
+                    })
+
+            # 5) Карта для этого дня с треком, последней точкой, остановками и точками нулевой скорости
+            coords = [[p["lat"], p["lon"]] for p in detailed_points]
+            last   = coords[-1] if coords else None
+
+            car_icon_url   = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
+            coords_json    = json.dumps(coords)
+            last_point_json= json.dumps(last)
+            stops_json     = json.dumps(stops_info)
+            zero_pts_json  = json.dumps(zero_speed_points)
+
             map_html = f"""
             <div id="map_{day_str}_{unit_name}" style="height: 400px; margin-bottom: 30px;"></div>
             <script>
                 var map = L.map('map_{day_str}_{unit_name}').setView([48.0, 68.0], 6);
                 L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png').addTo(map);
                 var coords = {coords_json};
-                var last = {last_point_json};
+                var last   = {last_point_json};
+                var stops  = {stops_json};
+                var zeroPoints = {zero_pts_json};
+
+                // Рисуем трек
                 if (coords.length > 0) {{
                     var track = L.polyline(coords, {{color: 'red'}}).addTo(map);
                     map.fitBounds(track.getBounds());
+                    // Последняя точка
                     if (last) {{
                         var carIcon = L.icon({{
                             iconUrl: "{car_icon_url}",
@@ -599,6 +691,35 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                             .bindPopup("🚗 Последняя точка");
                     }}
                 }}
+
+                // Маркеры остановок > 10 минут
+                stops.forEach(function(s) {{
+                    var circleStop = L.circleMarker([s.lat, s.lon], {{
+                        radius: 6,
+                        color: 'blue',
+                        fillOpacity: 0.7
+                    }}).addTo(map);
+                    var popupStop = "<b>Остановка > 10 мин:</b><br>"
+                                    + "Начало: " + s.start_local;
+                    if (s.end_local) {{
+                        popupStop += "<br>Конец: " + s.end_local
+                                  + "<br>Длительность: " + s.duration;
+                    }}
+                    circleStop.bindPopup(popupStop);
+                }});
+
+                // Точки нулевой скорости (⛔)
+                zeroPoints.forEach(function(z) {{
+                    var zeroIcon = L.icon({{
+                        iconUrl: 'https://cdn-icons-png.flaticon.com/512/1033/1033151.png',
+                        iconSize: [20, 20],
+                        iconAnchor: [10, 10]
+                    }});
+                    L.marker([z.lat, z.lon], {{icon: zeroIcon}}).addTo(map)
+                     .bindPopup("⛔ Скорость = 0<br>Время (UTC): " + z.time);
+                }});
+
+                // Слои с границами регионов и городами
                 var regionsLayer = L.geoJSON({regions_geojson_str}, {{
                     style: function(feature) {{
                         return {{ color: 'black', weight: 1, fillOpacity: 0 }};
@@ -615,7 +736,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                             }}
                         }}
                     }}
-                }});    
+                }});
                 var citiesLayer = L.geoJSON({cities_geojson_str}, {{
                     pointToLayer: function(feature, latlng) {{
                         var marker = L.marker(latlng);
@@ -624,9 +745,10 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                         }}
                         return marker;
                     }}
-                }});  
+                }});
                 var cityCluster = L.markerClusterGroup();
                 cityCluster.addLayer(citiesLayer);
+
                 var overlays = {{
                     "Границы регионов": regionsLayer,
                     "Пункты населения": cityCluster
@@ -665,6 +787,8 @@ if st.button("🚀 Запустить отчёты и карту для выбр
 
     st.success("✅ Построение отчетов и карт завершено.")
 
+# … (остальная часть кода без изменений) …
+
 # ------------------ Блок 2: "📤 Сформировать отчёт по выезду из домашнего региона" ------------------
 if st.button("📤 Сформировать отчёт по выезду из домашнего региона (Для всех) (Excel + таблицы)"):
     # Сначала читаем CSV с ответственными регионами
@@ -693,14 +817,12 @@ if st.button("📤 Сформировать отчёт по выезду из д
             not_departed_df = report_df[report_df["Статус"] == "Еще не выехал"]
             departed_df     = report_df[report_df["Статус"] == "Выехал"]
 
-            # Если хотя бы один DF не пуст, записываем их
             if not not_departed_df.empty or not departed_df.empty:
                 sheet_not = f"{day_str}_НеВыехал"
                 sheet_dep = f"{day_str}_Выехал"
                 not_departed_df.to_excel(writer, sheet_name=sheet_not, index=False)
                 departed_df.to_excel(writer, sheet_name=sheet_dep, index=False)
             else:
-                # Иначе — лист «Нет данных»
                 dummy = pd.DataFrame({"Сообщение": [f"Нет данных за {day_str}"]})
                 dummy.to_excel(writer, sheet_name=f"{day_str}_НетДанных", index=False)
 

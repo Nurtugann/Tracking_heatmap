@@ -484,9 +484,6 @@ with open(CITIES_GEOJSON, "r", encoding="utf-8") as f:
     cities_geojson_str = json.dumps(json.load(f))
 
 # ------------------ Блок 1: "🚀 Запустить отчёты и карту для выбранных юнитов" ------------------
-# … (весь предыдущий код остаётся без изменений) …
-
-# ------------------ Блок 1: "🚀 Запустить отчёты и карту для выбранных юнитов" ------------------
 if st.button("🚀 Запустить отчёты и карту для выбранных юнитов"):
     all_dates = pd.date_range(start=date_from, end=date_to, freq="D").to_pydatetime().tolist()
 
@@ -599,62 +596,126 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             # 3) Детекция остановок (UTC → местное + отметка на карте)
             stops_utc = detect_stops(detailed_points, zero_threshold=1)
 
-            # === ИЗМЕНЕНИЕ: фильтруем остановки по длительности > 10 минут ===
+            # === Определение домашнего региона ===
+            df_first = pd.DataFrame([detailed_points[0]])
+            df_first["geometry"] = df_first.apply(lambda row: Point(row["lon"], row["lat"]), axis=1)
+            gdf_first = gpd.GeoDataFrame(df_first, geometry="geometry", crs="EPSG:4326")
+
+            with open(REGIONS_GEOJSON, "r", encoding="utf-8") as f:
+                regions_geojson = json.load(f)
+            gdf_regions = gpd.GeoDataFrame.from_features(regions_geojson["features"])
+            gdf_regions.crs = "EPSG:4326"
+            if "shapeName" not in gdf_regions.columns:
+                gdf_regions["shapeName"] = gdf_regions.get("name", "")
+
+            gdf_first_joined = gpd.sjoin(
+                gdf_first,
+                gdf_regions[['geometry', 'shapeName']],
+                how="left",
+                predicate="within"
+            )
+            home_region = gdf_first_joined.iloc[0]["shapeName"] if not gdf_first_joined.empty else None
+
+            # === Фильтрация остановок: только вне домашнего региона и > 15 минут ===
             filtered_stops = []
             for s in stops_utc:
-                start_ts = s["stop_start_utc"]
-                if s["stop_end_utc"] is not None:
-                    end_ts = s["stop_end_utc"]
-                    duration = (end_ts - start_ts).total_seconds()
-                    if duration > 10 * 60:  # оставляем только если > 10 минут
-                        filtered_stops.append(s)
-                # если остановка не закончилась до конца дня (stop_end_utc == None),
-                # можно вычислять продолжительность до последней точки: 
-                # здесь, например, опустим такие «незаконченные» (или включим по желанию)
-            # =========================== конец изменения ===========================
+                if s["stop_end_utc"] is None:
+                    continue  # игнорируем незавершённые остановки
+                duration = (s["stop_end_utc"] - s["stop_start_utc"]).total_seconds()
+                if duration < 15 * 60:
+                    continue  # игнорируем короткие остановки
 
-            stops_info = []
-            for s in filtered_stops:
-                start_local = s["stop_start_utc"] + datetime.timedelta(hours=5)
-                if s["stop_end_utc"] is not None:
-                    end_local    = s["stop_end_utc"] + datetime.timedelta(hours=5)
-                    duration_sec = (s["stop_end_utc"] - s["stop_start_utc"]).total_seconds()
-                    # Форматируем длительность в «чч:мм:сс»
-                    hours   = int(duration_sec // 3600)
-                    minutes = int((duration_sec % 3600) // 60)
-                    seconds = int(duration_sec % 60)
-                    duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                    end_str = end_local.strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    duration_str = ""
-                    end_str = ""
+                stop_point = gpd.GeoDataFrame(
+                    {"geometry": [Point(s["lon"], s["lat"])]},
+                    crs="EPSG:4326"
+                )
+                joined = gpd.sjoin(stop_point, gdf_regions[['geometry', 'shapeName']], how="left", predicate="within")
+                stop_region = joined.iloc[0]["shapeName"] if not joined.empty else None
 
-                stops_info.append({
-                    "lat": s["lat"],
-                    "lon": s["lon"],
-                    "start_local": start_local.strftime("%Y-%m-%d %H:%M:%S"),
-                    "end_local": end_str,
-                    "duration": duration_str
-                })
+                if stop_region != home_region:
+                    # Добавляем в финальный список, если остановка вне домашнего региона
+                    start_local = s["stop_start_utc"] + datetime.timedelta(hours=5)
+                    end_local   = s["stop_end_utc"] + datetime.timedelta(hours=5)
+                    duration_str = f"{int(duration // 3600):02d}:{int((duration % 3600) // 60):02d}:{int(duration % 60):02d}"
+                    filtered_stops.append({
+                        "lat": s["lat"],
+                        "lon": s["lon"],
+                        "start_local": start_local.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end_local": end_local.strftime("%Y-%m-%d %H:%M:%S"),
+                        "duration": duration_str
+                    })
 
-            if stops_info:
-                df_stops = pd.DataFrame(stops_info)
-                st.subheader("🛑 Остановки > 10 минут (локальное время)")
+            # === Вывод таблицы с остановками вне домашнего региона ===
+            if filtered_stops:
+                df_stops = pd.DataFrame(filtered_stops)
+                st.subheader("🛑 Остановки > 15 минут ВНЕ домашнего региона")
                 st.dataframe(df_stops, use_container_width=True)
             else:
-                st.info("Нет остановок > 10 минут за этот день.")
+                st.info("Нет остановок > 15 минут вне домашнего региона за этот день.")
 
-            # 4) Отметка точек с нулевой скоростью (или NaN) – готовим список для карты
+            # 4) Отметка ⛔ точек нулевой скорости вне домашнего региона, где длительность > 15 мин
             zero_speed_points = []
-            for p in detailed_points:
-                spd_val = p.get("spd", None)
-                if spd_val is None or spd_val <= ZERO_SPEED_THRESHOLD:
-                    # Если спид нет (None) или ≤ 0 – считаем стоящей «точкой нулевой скорости»
-                    zero_speed_points.append({
-                        "lat": p["lat"],
-                        "lon": p["lon"],
-                        "time": p["time"]
-                    })
+
+            # Подготовим DataFrame с datetime и скоростью
+            df = pd.DataFrame(detailed_points)
+            df["datetime_utc"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+            df["spd"] = pd.to_numeric(df["spd"], errors="coerce").fillna(0)
+            df["is_zero_speed"] = df["spd"] <= ZERO_SPEED_THRESHOLD
+
+            in_zero = False
+            segment_start = None
+            segment_points = []
+
+            for idx, row in df.iterrows():
+                if row["is_zero_speed"]:
+                    if not in_zero:
+                        # Начало нового сегмента
+                        in_zero = True
+                        segment_start = row["datetime_utc"]
+                        segment_points = [row]
+                    else:
+                        segment_points.append(row)
+                else:
+                    if in_zero:
+                        # Закончился сегмент
+                        in_zero = False
+                        segment_end = row["datetime_utc"]
+                        duration = (segment_end - segment_start).total_seconds()
+                        if duration >= 15 * 60:
+                            for pt in segment_points:
+                                pt_geom = gpd.GeoDataFrame(
+                                    {"geometry": [Point(pt["lon"], pt["lat"])]},
+                                    crs="EPSG:4326"
+                                )
+                                joined = gpd.sjoin(pt_geom, gdf_regions[["geometry", "shapeName"]], how="left", predicate="within")
+                                region = joined.iloc[0]["shapeName"] if not joined.empty else None
+                                if region != home_region:
+                                    zero_speed_points.append({
+                                        "lat": pt["lat"],
+                                        "lon": pt["lon"],
+                                        "time": pt["datetime_utc"].strftime("%Y-%m-%d %H:%M:%S")
+                                    })
+
+            # Обработка незавершённого сегмента в конце
+            if in_zero and segment_points:
+                segment_end = segment_points[-1]["datetime_utc"]
+                duration = (segment_end - segment_start).total_seconds()
+                if duration >= 15 * 60:
+                    for pt in segment_points:
+                        pt_geom = gpd.GeoDataFrame(
+                            {"geometry": [Point(pt["lon"], pt["lat"])]},
+                            crs="EPSG:4326"
+                        )
+                        joined = gpd.sjoin(pt_geom, gdf_regions[["geometry", "shapeName"]], how="left", predicate="within")
+                        region = joined.iloc[0]["shapeName"] if not joined.empty else None
+                        if region != home_region:
+                            zero_speed_points.append({
+                                "lat": pt["lat"],
+                                "lon": pt["lon"],
+                                "time": pt["datetime_utc"].strftime("%Y-%m-%d %H:%M:%S")
+                            })
+
+
 
             # 5) Карта для этого дня с треком, последней точкой, остановками и точками нулевой скорости
             coords = [[p["lat"], p["lon"]] for p in detailed_points]
@@ -663,7 +724,7 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             car_icon_url   = "https://cdn-icons-png.flaticon.com/512/854/854866.png"
             coords_json    = json.dumps(coords)
             last_point_json= json.dumps(last)
-            stops_json     = json.dumps(stops_info)
+            stops_json     = json.dumps(filtered_stops)
             zero_pts_json  = json.dumps(zero_speed_points)
 
             map_html = f"""
@@ -692,14 +753,14 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                     }}
                 }}
 
-                // Маркеры остановок > 10 минут
+                // Маркеры остановок > 15 минут
                 stops.forEach(function(s) {{
                     var circleStop = L.circleMarker([s.lat, s.lon], {{
                         radius: 6,
                         color: 'blue',
                         fillOpacity: 0.7
                     }}).addTo(map);
-                    var popupStop = "<b>Остановка > 10 мин:</b><br>"
+                    var popupStop = "<b>Остановка > 15 мин:</b><br>"
                                     + "Начало: " + s.start_local;
                     if (s.end_local) {{
                         popupStop += "<br>Конец: " + s.end_local
