@@ -504,6 +504,10 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             report_result   = execute_report(SID, res["id"], tpl_id, unit_id, day_from_ts, day_to_ts)
             detailed_points = get_track(SID, unit_id, day_from_ts, day_to_ts)
 
+            if not detailed_points:
+                st.info(f"❌ Нет точек трека для {unit_name} за {day_str}, пропускаем.")
+                continue
+
             # 1) Переходы между регионами (UTC)
             crossings = detect_region_crossings(detailed_points, REGIONS_GEOJSON)
             if crossings:
