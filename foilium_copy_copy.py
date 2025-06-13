@@ -12,12 +12,15 @@ st.set_page_config(layout="wide")
 st.title("🚗 Карта трека + 📊 Отчёты + 🗺️ Переходы регионов (по нескольким юнитам)")
 
 # —————— Корректная очистка кеша только после инициализации сессии ——————
-if "cache_cleared" not in st.session_state:
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
-    st.session_state.cache_cleared = True
+# Попытка очистить кеш один раз, но только если SessionInfo уже готов
+# try:
+#     if "cache_cleared" not in st.session_state:
+#         st.cache_data.clear()
+#         st.session_state.cache_cleared = True
+# except RuntimeError:
+#     # если сессия ещё не инициализирована — отложим на следующий ран
+#     pass
+
 
 # --- Константы ---
 TOKEN = "c611c2bab48335e36a4b59be460c57d2BF8416B73C4A65F2B8A88A5848E97CD4471F14C6"
@@ -503,6 +506,10 @@ if st.button("🚀 Запустить отчёты и карту для выбр
             # Получаем отчёт и трек за текущий день
             report_result   = execute_report(SID, res["id"], tpl_id, unit_id, day_from_ts, day_to_ts)
             detailed_points = get_track(SID, unit_id, day_from_ts, day_to_ts)
+
+            if not detailed_points:
+                st.info(f"❌ Нет точек трека для {unit_name} за {day_str}, пропускаем.")
+                continue
 
             # 1) Переходы между регионами (UTC)
             crossings = detect_region_crossings(detailed_points, REGIONS_GEOJSON)

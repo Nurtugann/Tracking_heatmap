@@ -579,52 +579,52 @@ if st.button("🚀 Запустить отчёты и карту для выбр
                         "duration": duration_str
                     })
 
-            # === Вывод таблицы с остановками вне домашнего региона ===
-            if filtered_stops:
-                df_stops = pd.DataFrame(filtered_stops)
-                st.subheader("🛑 Остановки > 15 минут ВНЕ домашнего региона")
-                st.dataframe(df_stops, use_container_width=True)
-            else:
-                st.info("Нет остановок > 15 минут вне домашнего региона за этот день.")
+            # # === Вывод таблицы с остановками вне домашнего региона ===
+            # if filtered_stops:
+            #     df_stops = pd.DataFrame(filtered_stops)
+            #     st.subheader("🛑 Остановки > 15 минут ВНЕ домашнего региона")
+            #     st.dataframe(df_stops, use_container_width=True)
+            # else:
+            #     st.info("Нет остановок > 15 минут вне домашнего региона за этот день.")
 
-            # ——— Объединяем переходы и остановки в одну хронологическую таблицу ———
-            try:
-                # 1) Приводим переходы к единому виду
-                df_cross = (
-                    df_crossings
-                    .drop(columns=["time"])
-                    .rename(columns={"time_local": "time"})
-                    .assign(
-                        type="crossing",
-                        duration=""
-                    )
-                    .loc[:, ["time", "type", "from_region", "to_region", "lat", "lon", "duration"]]
-                )
+            # # ——— Объединяем переходы и остановки в одну хронологическую таблицу ———
+            # try:
+            #     # 1) Приводим переходы к единому виду
+            #     df_cross = (
+            #         df_crossings
+            #         .drop(columns=["time"])
+            #         .rename(columns={"time_local": "time"})
+            #         .assign(
+            #             type="crossing",
+            #             duration=""
+            #         )
+            #         .loc[:, ["time", "type", "from_region", "to_region", "lat", "lon", "duration"]]
+            #     )
 
-                # 2) Приводим остановки к тому же виду
-                df_stop = (
-                    df_stops
-                    .rename(columns={"start_local": "time", "duration": "duration"})
-                    .assign(
-                        type="stop",
-                        from_region="", to_region=""
-                    )
-                    .loc[:, ["time", "type", "from_region", "to_region", "lat", "lon", "duration"]]
-                )
+            #     # 2) Приводим остановки к тому же виду
+            #     df_stop = (
+            #         df_stops
+            #         .rename(columns={"start_local": "time", "duration": "duration"})
+            #         .assign(
+            #             type="stop",
+            #             from_region="", to_region=""
+            #         )
+            #         .loc[:, ["time", "type", "from_region", "to_region", "lat", "lon", "duration"]]
+            #     )
 
-                # 3) Склеиваем и сортируем по времени
-                combined = (
-                    pd.concat([df_cross, df_stop], ignore_index=True)
-                    .assign(time=lambda df: pd.to_datetime(df["time"]))
-                    .sort_values("time")
-                    .reset_index(drop=True)
-                )
+            #     # 3) Склеиваем и сортируем по времени
+            #     combined = (
+            #         pd.concat([df_cross, df_stop], ignore_index=True)
+            #         .assign(time=lambda df: pd.to_datetime(df["time"]))
+            #         .sort_values("time")
+            #         .reset_index(drop=True)
+            #     )
 
-                # 4) Выводим результат
-                st.subheader("⏱️ Все события (переходы и остановки) в хронологическом порядке")
-                st.dataframe(combined, use_container_width=True)
-            except:
-                st.info("Нет данных для вывода.")
+            #     # 4) Выводим результат
+            #     st.subheader("⏱️ Все события (переходы и остановки) в хронологическом порядке")
+            #     st.dataframe(combined, use_container_width=True)
+            # except:
+                # st.info("Нет данных для вывода.")
 
             # 4) Отметка ⛔ точек нулевой скорости…
             zero_speed_points = []
