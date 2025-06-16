@@ -338,7 +338,8 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
                 "Время возвращения": None,
                 "Первый въезд в ответственные регионы": "",
                 "Комментарий по регионам": "Нет данных по треку",
-                "Время в ответственных регионах": ""
+                "Время в ответственных регионах": "",
+                "Суммарное время в ответственных регионах": ""
             })
             my_bar.progress(i / total_units, text=f"{unit_name} — нет данных")
             continue
@@ -385,6 +386,13 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             seconds = total_sec % 60
             readable_times_resp.append(f"{region_name}: {hours:02d}:{minutes:02d}:{seconds:02d}")
         time_in_resp_str = "\n".join(readable_times_resp)
+
+        # Подсчёт суммарного времени во всех ответственных регионах
+        total_resp_seconds = sum(region_seconds.values())
+        h_total = total_resp_seconds // 3600
+        m_total = (total_resp_seconds % 3600) // 60
+        s_total = total_resp_seconds % 60
+        time_in_resp_total_str = f"{h_total:02d}:{m_total:02d}:{s_total:02d}"
 
         # Визит/возврат для домашнего региона (по UTC-событиям)
         departure_event = None
@@ -473,7 +481,8 @@ def create_departure_report(unit_dict, units_to_process, SID, regions_geojson_pa
             "Время возвращения": ret_local,
             "Первый въезд в ответственные регионы": entry_times_str,
             "Комментарий по регионам": region_comment,
-            "Время в ответственных регионах": time_in_resp_str
+            "Время в ответственных регионах": time_in_resp_str,
+            "Суммарное время в ответственных регионах": time_in_resp_total_str
         })
 
         my_bar.progress(i / total_units, text=f"{unit_name} ✅")
