@@ -23,7 +23,7 @@ st.title("🚗 Карта трека + 📊 Отчёты + 🗺️ Перехо�
 
 
 # --- Константы ---
-TOKEN = "c611c2bab48335e36a4b59be460c57d2BF8416B73C4A65F2B8A88A5848E97CD4471F14C6"
+TOKEN = "c611c2bab48335e36a4b59be460c57d24CCBD1F371CA6085435EB160AFF2AF5D00C5AF77"
 BASE_URL = "https://hst-api.wialon.host/wialon/ajax.html"
 REGIONS_GEOJSON = "OSMB-f1ec2d0019a5c0c4984f489cdc13d5d26a7949fd.geojson"
 CITIES_GEOJSON = "hotosm_kaz_populated_places_points_geojson.geojson"
